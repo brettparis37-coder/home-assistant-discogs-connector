@@ -500,6 +500,9 @@ class CollectionDatabase:
                 row["artist"] = ", ".join(item[0] for item in connection.execute(
                     """SELECT a.name FROM discogs_release_artists ra JOIN discogs_artists a USING (artist_key)
                        WHERE ra.release_id=? ORDER BY ra.position""", (rid,)))
+                row["artist_names"] = [item[0] for item in connection.execute(
+                    """SELECT a.name FROM discogs_release_artists ra JOIN discogs_artists a USING (artist_key)
+                       WHERE ra.release_id=? ORDER BY ra.position""", (rid,))]
                 label_rows = connection.execute(
                     """SELECT l.name, rl.catalog_number FROM discogs_release_labels rl
                        JOIN discogs_labels l USING (label_key) WHERE rl.release_id=? ORDER BY rl.position""", (rid,)
@@ -508,6 +511,10 @@ class CollectionDatabase:
                 row["catalog_numbers"] = [item["catalog_number"] for item in label_rows if item["catalog_number"]]
                 row["formats"] = [item[0] for item in connection.execute(
                     "SELECT name FROM discogs_release_formats WHERE release_id=? ORDER BY position", (rid,))]
+                row["genres"] = [item[0] for item in connection.execute(
+                    "SELECT value FROM discogs_release_classifications WHERE release_id=? AND kind='genre' ORDER BY value COLLATE NOCASE", (rid,))]
+                row["styles"] = [item[0] for item in connection.execute(
+                    "SELECT value FROM discogs_release_classifications WHERE release_id=? AND kind='style' ORDER BY value COLLATE NOCASE", (rid,))]
         return items, {"synced_at": float(sync["synced_at"]), "total": int(sync["total"])}
 
     def replace_collection(self, username: str, items: list[dict[str, Any]], total: int) -> float:
@@ -578,7 +585,7 @@ class CollectionClient:
         self.database = CollectionDatabase(DATABASE_PATH, LEGACY_DATABASE_PATHS)
         self.session = requests.Session()
         self.session.headers.update({
-            "User-Agent": "HomeAssistantDiscogsConnector/0.3.0 (personal collection browser)",
+            "User-Agent": "HomeAssistantDiscogsConnector/0.4.0 (personal collection browser)",
             "Accept": "application/vnd.discogs.v2.plain+json",
         })
         if self.token:
@@ -656,6 +663,69 @@ class CollectionClient:
             self.database.replace_collection(self.username, items, total or len(items))
             return {"items": items, "status": self.status()}
 
+    def overview(self) -> dict[str, Any]:
+        if not self.token:
+            raise RuntimeError("Add your Discogs personal access token in the app Configuration, then restart the app.")
+        items, sync = self.database.collection_snapshot(self.username)
+        if not sync:
+            raise RuntimeError("Load your collection first to build its overview.")
+        response = self.session.get(f"{API_ROOT}/users/{self.username}", timeout=30)
+        response.raise_for_status()
+        profile = response.json()
+
+        def top_values(key: str, limit: int = 5) -> list[dict[str, Any]]:
+            counts: dict[str, int] = {}
+            for item in items:
+                for value in set(item.get(key) or []):
+                    if value:
+                        counts[str(value)] = counts.get(str(value), 0) + 1
+            return [{"name": name, "count": count} for name, count in sorted(
+                counts.items(), key=lambda pair: (-pair[1], pair[0].casefold())
+            )[:limit]]
+
+        years = [int(item["year"]) for item in items if str(item.get("year") or "").isdigit() and int(item["year"]) > 0]
+        decade_counts: dict[str, int] = {}
+        for year in years:
+            decade = f"{year // 10 * 10}s"
+            decade_counts[decade] = decade_counts.get(decade, 0) + 1
+        decade_rows = [{"name": name, "count": count} for name, count in sorted(
+            decade_counts.items(), key=lambda pair: (-pair[1], pair[0])
+        )]
+        return {
+            "profile": {key: profile.get(key) for key in ("username", "name", "location", "registered", "profile", "avatar_url")},
+            "stats": {
+                "record_count": len(items),
+                "dated_count": len(years),
+                "average_year": round(sum(years) / len(years)) if years else None,
+                "oldest_year": min(years) if years else None,
+                "newest_year": max(years) if years else None,
+                "top_decades": decade_rows[:5],
+                "top_artists": top_values("artist_names"),
+                "top_genres": top_values("genres"),
+                "top_styles": top_values("styles"),
+                "top_formats": top_values("formats"),
+                "top_labels": top_values("labels"),
+                "last_synced_at": sync["synced_at"],
+            },
+        }
+
+    def marketplace_stats(self, release_id: int) -> dict[str, Any]:
+        if not self.token:
+            raise RuntimeError("Add your Discogs personal access token in the app Configuration, then restart the app.")
+        response = self.session.get(
+            f"{API_ROOT}/marketplace/stats/{release_id}", params={"curr_abbr": "USD"}, timeout=30
+        )
+        response.raise_for_status()
+        payload = response.json()
+        lowest = payload.get("lowest_price") or {}
+        return {
+            "lowest_listing": lowest.get("value") if isinstance(lowest, dict) else None,
+            "currency": lowest.get("currency") if isinstance(lowest, dict) else "USD",
+            "for_sale": payload.get("num_for_sale"),
+            "blocked_from_sale": bool(payload.get("blocked_from_sale")),
+            "fetched_at": time.time(),
+        }
+
     def release(self, release_id: int, force: bool = False) -> dict[str, Any]:
         if not self.token:
             raise RuntimeError("Add your Discogs personal access token in the app Configuration, then restart the app.")
@@ -683,33 +753,39 @@ PAGE = r"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Discogs Collection</title>
 <style>
-:root{color-scheme:light dark;font:16px system-ui,sans-serif}body{margin:0;padding:24px;max-width:1200px;margin-inline:auto}
-h1{margin:0 0 4px}.muted{opacity:.72}.toolbar{display:flex;gap:12px;margin:20px 0;flex-wrap:wrap}input{flex:1;min-width:220px;padding:12px;border-radius:8px;border:1px solid #888;font:inherit}
-button{padding:10px 16px;border:0;border-radius:8px;font:inherit;cursor:pointer}.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:14px}
-.card{display:flex;gap:12px;padding:12px;border:1px solid #8885;border-radius:12px;min-height:112px}.cover{width:92px;height:92px;object-fit:cover;border-radius:6px;background:#7773;flex:none}.details{min-width:0}.title{font-weight:650}.sub{font-size:.9em;opacity:.8;margin-top:4px}.attribution{font-size:.83em;margin-top:18px}
-#status{margin-top:8px}.error{color:#ff7272}.album-title{display:flex;gap:20px;align-items:flex-start;margin:18px 0}.album-cover{width:min(220px,40vw);height:min(220px,40vw);object-fit:cover;border-radius:10px;background:#7773}.tracks{width:100%;border-collapse:collapse;margin-top:12px}.tracks th,.tracks td{text-align:left;padding:9px 7px;border-bottom:1px solid #8885;vertical-align:top}.track-pos,.track-time{white-space:nowrap;opacity:.8}.release-meta{display:flex;gap:8px;flex-wrap:wrap}.badge{padding:4px 9px;border:1px solid #8886;border-radius:999px;font-size:.86em}
+:root{color-scheme:light dark;font:16px system-ui,sans-serif}body{margin:0;padding:24px;max-width:1500px;margin-inline:auto}
+h1{margin:0 0 4px}.muted{opacity:.72}.toolbar{display:flex;gap:12px;margin:18px 0;flex-wrap:wrap}input{flex:1;min-width:220px;padding:12px;border-radius:8px;border:1px solid #888;font:inherit}
+button{padding:10px 16px;border:0;border-radius:8px;font:inherit;cursor:pointer}.tabs{display:flex;gap:8px;border-bottom:1px solid #8885;margin:22px 0}.tab{background:transparent;border-radius:8px 8px 0 0;opacity:.75}.tab.active{opacity:1;border-bottom:3px solid #58a6ff}.panel{min-width:0}.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:12px;margin:18px 0}.stat,.block{padding:16px;border:1px solid #8885;border-radius:12px}.stat strong{display:block;font-size:1.55rem;margin-top:4px}.overview-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px}.list{padding-left:22px;margin-bottom:0}.list li{margin:7px 0}.table-wrap{overflow:auto;border:1px solid #8885;border-radius:12px}table.collection{width:100%;border-collapse:collapse;min-width:800px;table-layout:fixed}table.collection th,table.collection td{text-align:left;padding:10px;border-bottom:1px solid #8885;vertical-align:middle}table.collection th{position:sticky;top:0;background:Canvas;z-index:1}table.collection th:nth-child(1){width:94px}table.collection th:nth-child(2){width:28%}table.collection th:nth-child(3){width:20%}table.collection th:nth-child(4){width:100px}table.collection th:nth-child(5){width:19%}table.collection th:nth-child(6){width:16%}.cover{width:72px;height:72px;object-fit:cover;border-radius:6px;background:#7773;display:block}.title{font-weight:650}.sub{font-size:.9em;opacity:.8;margin-top:4px}.attribution{font-size:.83em;margin-top:22px}
+#status{margin-top:8px}.error{color:#ff7272}.album-title{display:flex;gap:20px;align-items:flex-start;margin:18px 0}.album-cover{width:min(220px,40vw);height:min(220px,40vw);object-fit:cover;border-radius:10px;background:#7773}.tracks{width:100%;border-collapse:collapse;margin-top:12px}.tracks th,.tracks td{text-align:left;padding:9px 7px;border-bottom:1px solid #8885;vertical-align:top}.track-pos,.track-time{white-space:nowrap;opacity:.8}.release-meta{display:flex;gap:8px;flex-wrap:wrap}.badge{padding:4px 9px;border:1px solid #8886;border-radius:999px;font-size:.86em}.price-panel{padding:14px;border:1px solid #8885;border-radius:12px;margin:18px 0}.price-numbers{display:flex;gap:18px;flex-wrap:wrap}.price-numbers strong{font-size:1.2rem}
 </style></head><body>
-<section id="collection-view"><h1>Discogs Collection</h1><div id="status" class="muted">Connect to Discogs to load your collection.</div>
+<h1>Discogs Collection</h1><div id="status" class="muted">Connect to Discogs to load your collection.</div>
+<nav class="tabs" aria-label="Collection pages"><button class="tab active" data-tab="overview">Overview</button><button class="tab" data-tab="collection">Collection</button></nav>
+<section id="overview-view" class="panel"><div id="overview"></div></section>
+<section id="collection-view" class="panel" hidden>
 <div class="toolbar"><input id="query" type="search" placeholder="Search artist, album, label, or catalog number" aria-label="Search collection"><button id="refresh">Refresh collection</button></div>
-<main id="results" class="grid"></main></section>
+<div id="count" class="muted"></div><div class="table-wrap"><table class="collection"><thead><tr><th>Cover</th><th>Album</th><th>Artist</th><th>Year</th><th>Format</th><th>Label / catalog</th></tr></thead><tbody id="results"></tbody></table></div></section>
 <section id="release-view" hidden></section>
-<p class="attribution">Data provided by Discogs. This application uses Discogs’ API but is not affiliated with, sponsored or endorsed by Discogs. 'Discogs' is a trademark of Zink Media, LLC. Each result links to its Discogs release page.</p>
+<p class="attribution">Data provided by Discogs. This application uses Discogs’ API but is not affiliated with, sponsored or endorsed by Discogs. 'Discogs' is a trademark of Zink Media, LLC.</p>
 <script>
 let rows=[]; const esc=s=>String(s??'').replace(/[&<>\"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;',"'":'&#39;'}[c]));
 function render(){const q=document.querySelector('#query').value.trim().toLocaleLowerCase();const found=rows.filter(x=>[x.artist,x.title,x.year,...x.formats,...x.labels,...x.catalog_numbers].join(' ').toLocaleLowerCase().includes(q));
- document.querySelector('#results').innerHTML=found.map(x=>`<article class="card">${x.thumb?`<img class="cover" loading="lazy" src="${esc(x.thumb)}" alt="">`:'<div class="cover"></div>'}<div class="details"><div class="title"><a href="#release/${encodeURIComponent(x.release_id)}">${esc(x.title)}</a></div><div class="sub">${esc(x.artist)}${x.year?' · '+esc(x.year):''}</div><div class="sub">${esc([...x.formats,...x.labels].join(' · '))}</div><div class="sub">${esc(x.catalog_numbers.join(', '))}</div><div class="sub"><a href="https://www.discogs.com${esc(x.uri||'/release/'+x.release_id)}" target="_blank" rel="noopener">Data provided by Discogs</a></div></div></article>`).join('');
- const count=document.querySelector('#count');if(count)count.textContent=`${found.length} shown`;
+ document.querySelector('#results').innerHTML=found.length?found.map(x=>`<tr><td>${x.thumb?`<img class="cover" loading="lazy" src="${esc(x.thumb)}" alt="Cover for ${esc(x.title)}">`:'<div class="cover"></div>'}</td><td class="title"><a href="#release/${encodeURIComponent(x.release_id)}">${esc(x.title)}</a></td><td>${esc(x.artist)}</td><td>${esc(x.year||'—')}</td><td>${esc(x.formats.join(', ')||'—')}</td><td>${esc([...x.labels,...x.catalog_numbers].join(' · ')||'—')}</td></tr>`).join(''):'<tr><td colspan="6" class="muted">No matching records</td></tr>';
+ document.querySelector('#count').textContent=`${found.length} of ${rows.length} records`;
 }
-async function load(force=false){const st=document.querySelector('#status');st.className='muted';st.textContent=force?'Refreshing from Discogs…':'Loading your collection…';document.querySelector('#refresh').disabled=true;
- try{const r=await fetch('api/collection'+(force?'?refresh=1':''));const data=await r.json();if(!r.ok)throw new Error(data.error||'Request failed');rows=data.items||[];const age=Math.max(0,Math.round((data.status.age_seconds||0)/60));st.innerHTML=`<span id="count"></span> · ${esc(data.status.username)} · fetched ${age} min ago (saved locally)`;render();}
+function list(items){return items?.length?`<ol class="list">${items.map(x=>`<li>${esc(x.name)} <span class="muted">(${esc(x.count)})</span></li>`).join('')}</ol>`:'<p class="muted">No data available</p>';}
+async function loadOverview(){const target=document.querySelector('#overview');target.innerHTML='<p class="muted">Loading profile and collection insights…</p>';try{const r=await fetch('api/overview');const data=await r.json();if(!r.ok)throw new Error(data.error||'Could not load overview');const p=data.profile||{},s=data.stats||{};target.innerHTML=`<section class="block"><h2>${esc(p.name||p.username||'Discogs profile')}</h2><p class="muted">${esc([p.location,p.registered&&('Member since '+String(p.registered).slice(0,4))].filter(Boolean).join(' · '))}</p>${p.profile?`<p>${esc(p.profile)}</p>`:''}</section><div class="stats"><div class="stat">Records<strong>${esc(s.record_count)}</strong></div><div class="stat">Average release year<strong>${esc(s.average_year||'—')}</strong><span class="muted">${esc(s.dated_count)} with a year listed</span></div><div class="stat">Release year range<strong>${esc(s.oldest_year||'—')} – ${esc(s.newest_year||'—')}</strong></div><div class="stat">Most common decade<strong>${esc(s.top_decades?.[0]?.name||'—')}</strong><span class="muted">${esc(s.top_decades?.[0]?.count||0)} records</span></div></div><div class="overview-grid"><section class="block"><h3>Most represented artists</h3>${list(s.top_artists)}</section><section class="block"><h3>Favorite genres</h3>${list(s.top_genres)}</section><section class="block"><h3>Styles</h3>${list(s.top_styles)}</section><section class="block"><h3>Formats</h3>${list(s.top_formats)}</section><section class="block"><h3>Labels</h3>${list(s.top_labels)}</section><section class="block"><h3>Collection age</h3>${list(s.top_decades)}</section></div>`;}catch(e){target.innerHTML=`<p class="error">${esc(e.message)}</p><button onclick="loadOverview()">Retry</button>`;}}
+async function load(force=false){const st=document.querySelector('#status');st.className='muted';st.textContent=force?'Refreshing from Discogs…':'Loading your collection…';const button=document.querySelector('#refresh');if(button)button.disabled=true;
+ try{const r=await fetch('api/collection'+(force?'?refresh=1':''));const data=await r.json();if(!r.ok)throw new Error(data.error||'Request failed');rows=data.items||[];const age=Math.max(0,Math.round((data.status.age_seconds||0)/60));st.textContent=`${esc(data.status.username)} · ${rows.length} records · refreshed ${age} min ago`;render();loadOverview();}
  catch(e){st.className='error';st.textContent=e.message;}
- finally{document.querySelector('#refresh').disabled=false;}}
-function backToCollection(){location.hash='';document.querySelector('#release-view').hidden=true;document.querySelector('#collection-view').hidden=false;}
-async function showRelease(id){if(!/^\d+$/.test(id))return;document.querySelector('#collection-view').hidden=true;const view=document.querySelector('#release-view');view.hidden=false;view.innerHTML='<button id="back">← Back to collection</button><p class="muted">Loading release details…</p>';view.querySelector('#back').onclick=backToCollection;
- try{const r=await fetch('api/releases/'+encodeURIComponent(id));const result=await r.json();if(!r.ok)throw new Error(result.error||'Could not load release');const x=result.release||{};const tracks=x.tracklist||[];const title=x.title||'Release details';const artist=(x.artists||[]).map(a=>a.name).filter(Boolean).join(', ');const formats=(x.formats||[]).map(f=>[f.name,f.qty,f.text].filter(Boolean).join(' '));const labels=(x.labels||[]).map(l=>[l.name,l.catno].filter(Boolean).join(' · '));const credits=(x.extraartists||[]).map(a=>[a.name,a.role].filter(Boolean).join(' — '));
- view.innerHTML=`<button id="back">← Back to collection</button><h1>${esc(title)}</h1><div class="album-title">${x.images?.[0]?.uri?`<img class="album-cover" src="${esc(x.images[0].uri)}" alt="Album artwork">`:''}<div><div class="sub">${esc(artist)}${x.year?' · '+esc(x.year):''}</div><div class="release-meta">${[...formats,...labels,...(x.genres||[]),...(x.styles||[])].map(v=>`<span class="badge">${esc(v)}</span>`).join('')}</div><p>${esc([x.country,x.released&&('Released '+x.released)].filter(Boolean).join(' · '))}</p>${credits.length?`<details><summary>Credits</summary><p>${credits.map(esc).join('<br>')}</p></details>`:''}</div></div><h2>Tracklist</h2>${tracks.length?`<table class="tracks"><thead><tr><th>Pos.</th><th>Track</th><th>Duration</th></tr></thead><tbody>${tracks.map(t=>`<tr><td class="track-pos">${esc(t.position)}</td><td>${esc(t.title)}${t.type_==='heading'?' (side/section)':''}</td><td class="track-time">${esc(t.duration)}</td></tr>`).join('')}</tbody></table>`:'<p>No tracklist was provided for this release.</p>'}${x.notes?`<details><summary>Discogs notes</summary><p>${esc(x.notes).replace(/\n/g,'<br>')}</p></details>`:''}<p class="muted">Release details ${result.cached?'loaded from local database':'fetched from Discogs and saved locally'} · ${result.age_seconds?Math.round(result.age_seconds/60)+' min ago':''}</p><p><a href="https://www.discogs.com/release/${encodeURIComponent(id)}" target="_blank" rel="noopener">Data provided by Discogs</a></p>`;view.querySelector('#back').onclick=backToCollection;
+ finally{if(button)button.disabled=false;}}
+function showTab(tab){document.querySelectorAll('.tab').forEach(b=>b.classList.toggle('active',b.dataset.tab===tab));document.querySelector('#overview-view').hidden=tab!=='overview';document.querySelector('#collection-view').hidden=tab!=='collection';}
+document.querySelectorAll('.tab').forEach(b=>b.addEventListener('click',()=>showTab(b.dataset.tab)));
+function backToCollection(){location.hash='';document.querySelector('#release-view').hidden=true;showTab('collection');}
+async function showRelease(id){if(!/^\d+$/.test(id))return;document.querySelector('#overview-view').hidden=true;document.querySelector('#collection-view').hidden=true;const view=document.querySelector('#release-view');view.hidden=false;view.innerHTML='<button id="back">← Back to collection</button><p class="muted">Loading release details…</p>';view.querySelector('#back').onclick=backToCollection;
+ try{const [r,pr]=await Promise.all([fetch('api/releases/'+encodeURIComponent(id)),fetch('api/marketplace/'+encodeURIComponent(id))]);const result=await r.json(),pricing=await pr.json();if(!r.ok)throw new Error(result.error||'Could not load release');const x=result.release||{};const tracks=x.tracklist||[];const title=x.title||'Release details';const artist=(x.artists||[]).map(a=>a.name).filter(Boolean).join(', ');const formats=(x.formats||[]).map(f=>[f.name,f.qty,f.text].filter(Boolean).join(' '));const labels=(x.labels||[]).map(l=>[l.name,l.catno].filter(Boolean).join(' · '));const credits=(x.extraartists||[]).map(a=>[a.name,a.role].filter(Boolean).join(' — '));const price=pricing.stats||{};const priceView=pricing.error?`<p class="muted">Current listing information could not be loaded: ${esc(pricing.error)}</p>`:`<p class="muted">This is the current asking price for an active listing, not the sold-price history.</p><div class="price-numbers"><span>Lowest current listing <strong>${price.lowest_listing!=null?esc(price.currency)+' '+esc(Number(price.lowest_listing).toFixed(2)):'Unavailable'}</strong></span><span>For sale <strong>${price.for_sale==null?'Unavailable':esc(price.for_sale)}</strong></span></div><p class="muted">Discogs’ API does not provide the recent sold-sales low / median / high summary here. See the release page for sales history.</p>`;
+ view.innerHTML=`<button id="back">← Back to collection</button><h1>${esc(title)}</h1><div class="album-title">${x.images?.[0]?.uri?`<img class="album-cover" src="${esc(x.images[0].uri)}" alt="Album artwork">`:''}<div><div class="sub">${esc(artist)}${x.year?' · '+esc(x.year):''}</div><div class="release-meta">${[...formats,...labels,...(x.genres||[]),...(x.styles||[])].map(v=>`<span class="badge">${esc(v)}</span>`).join('')}</div><p>${esc([x.country,x.released&&('Released '+x.released)].filter(Boolean).join(' · '))}</p>${credits.length?`<details><summary>Credits</summary><p>${credits.map(esc).join('<br>')}</p></details>`:''}</div></div><section class="price-panel"><h2>Marketplace pricing</h2>${priceView}</section><h2>Tracklist</h2>${tracks.length?`<table class="tracks"><thead><tr><th>Pos.</th><th>Track</th><th>Duration</th></tr></thead><tbody>${tracks.map(t=>`<tr><td class="track-pos">${esc(t.position)}</td><td>${esc(t.title)}${t.type_==='heading'?' (side/section)':''}</td><td class="track-time">${esc(t.duration)}</td></tr>`).join('')}</tbody></table>`:'<p>No tracklist was provided for this release.</p>'}${x.notes?`<details><summary>Discogs notes</summary><p>${esc(x.notes).replace(/\n/g,'<br>')}</p></details>`:''}<p class="muted">Release details ${result.cached?'loaded from local database':'fetched from Discogs and saved locally'} · ${result.age_seconds?Math.round(result.age_seconds/60)+' min ago':''}</p><p><a href="https://www.discogs.com/release/${encodeURIComponent(id)}" target="_blank" rel="noopener">Data provided by Discogs · open release and sales history</a></p>`;view.querySelector('#back').onclick=backToCollection;
  }catch(e){view.innerHTML=`<button id="back">← Back to collection</button><p class="error">${esc(e.message)}</p>`;view.querySelector('#back').onclick=backToCollection;}}
-function route(){const match=location.hash.match(/^#release\/(\d+)$/);if(match)showRelease(match[1]);else backToCollection();}
+function route(){const match=location.hash.match(/^#release\/(\d+)$/);if(match)showRelease(match[1]);else{document.querySelector('#release-view').hidden=true;showTab('overview');}}
 document.querySelector('#query').addEventListener('input',render);document.querySelector('#refresh').addEventListener('click',()=>load(true));window.addEventListener('hashchange',route);load();route();
 </script></body></html>"""
 
@@ -729,6 +805,32 @@ class Handler(BaseHTTPRequestHandler):
             except (requests.RequestException, ValueError) as exc:
                 print(f"Discogs collection request failed: {exc}", flush=True)
                 self.send_json(502, {"error": "Could not reach Discogs. Check the app log and try again."})
+            except RuntimeError as exc:
+                self.send_json(400, {"error": str(exc)})
+            return
+        if path.path == "/api/overview":
+            try:
+                self.send_json(200, get_client().overview())
+            except requests.HTTPError as exc:
+                self.send_json(502, {"error": self.discogs_error(exc)})
+            except (requests.RequestException, ValueError) as exc:
+                print(f"Discogs profile request failed: {exc}", flush=True)
+                self.send_json(502, {"error": "Could not load your Discogs profile. Check the app log and try again."})
+            except RuntimeError as exc:
+                self.send_json(400, {"error": str(exc)})
+            return
+        if path.path.startswith("/api/marketplace/"):
+            raw_id = path.path.removeprefix("/api/marketplace/")
+            if not raw_id.isdigit():
+                self.send_json(400, {"error": "Release ID must be a number."})
+                return
+            try:
+                self.send_json(200, {"stats": get_client().marketplace_stats(int(raw_id))})
+            except requests.HTTPError as exc:
+                self.send_json(502, {"error": self.discogs_error(exc)})
+            except (requests.RequestException, ValueError) as exc:
+                print(f"Discogs marketplace stats request failed: {exc}", flush=True)
+                self.send_json(502, {"error": "Could not load current listing information."})
             except RuntimeError as exc:
                 self.send_json(400, {"error": str(exc)})
             return
