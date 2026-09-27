@@ -16,7 +16,8 @@ from urllib.parse import urlparse
 import requests
 
 OPTIONS_PATH = Path("/data/options.json")
-DATABASE_PATH = Path("/data/discogs.sqlite3")
+DATABASE_PATH = Path("/share/discogs_connector/discogs.sqlite3")
+LEGACY_DATABASE_PATH = Path("/data/discogs.sqlite3")
 API_ROOT = "https://api.discogs.com"
 PORT = 8099
 MAX_PAGES = 100
@@ -33,9 +34,17 @@ def read_options() -> dict[str, Any]:
 class CollectionDatabase:
     """Small, versioned SQLite store for collection snapshots and release detail."""
 
-    def __init__(self, path: Path) -> None:
+    def __init__(self, path: Path, legacy_path: Path | None = None) -> None:
         self.path = path
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        if legacy_path and legacy_path != path and not path.exists() and legacy_path.is_file():
+            legacy_connection = sqlite3.connect(legacy_path, timeout=15)
+            new_connection = sqlite3.connect(path, timeout=15)
+            try:
+                legacy_connection.backup(new_connection)
+            finally:
+                new_connection.close()
+                legacy_connection.close()
         with self.connect() as connection:
             version = int(connection.execute("PRAGMA user_version").fetchone()[0])
             if version > 1:
@@ -160,7 +169,7 @@ class CollectionClient:
         self.username = str(options.get("discogs_username") or "IPAIRIS").strip()
         self.token = str(options.get("discogs_token") or "").strip()
         self.ttl_seconds = max(900, min(18000, int(options.get("cache_ttl_minutes", 240)) * 60))
-        self.database = CollectionDatabase(DATABASE_PATH)
+        self.database = CollectionDatabase(DATABASE_PATH, LEGACY_DATABASE_PATH)
         self.session = requests.Session()
         self.session.headers.update({
             "User-Agent": "HomeAssistantDiscogsConnector/0.2.0 (personal collection browser)",
