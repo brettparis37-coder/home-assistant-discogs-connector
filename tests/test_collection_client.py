@@ -31,6 +31,16 @@ class FakeSession:
 
     def get(self, url: str, *, params: dict | None = None, timeout: int) -> FakeResponse:
         self.calls.append({"url": url, "params": params, "timeout": timeout})
+        if "/marketplace/stats/" in url:
+            return FakeResponse({
+                "lowest_price": {"value": 12.34, "currency": "USD"},
+                "num_for_sale": 8, "blocked_from_sale": False,
+            })
+        if "/users/" in url and "/collection/" not in url:
+            return FakeResponse({
+                "username": "IPAIRIS", "name": "Record Collector", "location": "California",
+                "registered": "2010-01-01 00:00:00", "profile": "A Discogs profile",
+            })
         if "/releases/" in url:
             release_id = int(url.rsplit("/", 1)[1])
             return FakeResponse({
@@ -169,6 +179,22 @@ class CollectionClientTests(unittest.TestCase):
         cached = restarted.release(101)
         self.assertTrue(cached["cached"])
         self.assertEqual(restarted.session.calls, [])
+
+    def test_overview_builds_collection_insights_and_loads_profile(self) -> None:
+        self.client.collection()
+        result = self.client.overview()
+        self.assertEqual(result["profile"]["username"], "IPAIRIS")
+        self.assertEqual(result["stats"]["record_count"], 2)
+        self.assertEqual(result["stats"]["average_year"], 1972)
+        self.assertEqual(result["stats"]["top_artists"][0], {"name": "Artist 1", "count": 1})
+        self.assertEqual(self.client.session.calls[-1]["url"], "https://api.discogs.com/users/IPAIRIS")
+
+    def test_marketplace_stats_are_returned_without_persisting_them(self) -> None:
+        result = self.client.marketplace_stats(101)
+        self.assertEqual(result["lowest_listing"], 12.34)
+        self.assertEqual(result["currency"], "USD")
+        self.assertEqual(result["for_sale"], 8)
+        self.assertEqual(self.client.session.calls[-1]["params"], {"curr_abbr": "USD"})
 
     def test_migrates_legacy_file_and_preserves_other_shared_tables(self) -> None:
         target_path = Path(self.temp.name) / "fresh_shared.sqlite3"
