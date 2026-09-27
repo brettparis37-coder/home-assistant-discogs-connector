@@ -130,9 +130,10 @@ class CollectionClientTests(unittest.TestCase):
         details = self.client.release(101)
         self.assertEqual(details["release"]["tracklist"][0]["title"], "Opening Track")
         self.assertFalse(details["cached"])
-        cached = self.client.release(101)
+        restarted = self.module.CollectionClient()
+        cached = restarted.release(101)
         self.assertTrue(cached["cached"])
-        self.assertEqual(len(self.client.session.calls), 1)
+        self.assertEqual(restarted.session.calls, [])
 
     def test_requires_token(self) -> None:
         self.client.token = ""
