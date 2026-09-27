@@ -24,17 +24,20 @@ On first startup of version 0.3.0, the app preserves and imports existing Discog
 
 ## Collection data and refresh
 
+- The app opens on **Overview**, with profile information and collection statistics such as record count, average recorded release year, year range, decade distribution, and top artists, genres, styles, formats, and labels.
+- **Collection** is a searchable table with fixed-size artwork. Select an album title to open its release detail page; the table omits external Discogs links to keep the columns focused.
 - A refresh replaces the locally stored collection snapshot so new additions and removals appear. The default cache interval is four hours; **Refresh collection** fetches immediately.
 - Opening a release fetches its full Discogs details, including available tracklist, credits, formats, genres, and styles. Those details are cached in SQLite and reused for the configured cache interval.
+- The release detail view requests current marketplace listing stats when opened. It labels the lowest current asking price and number of active listings separately from sold prices. Discogs’ public API does not provide the last-30-sales low/median/high summary; use the linked Discogs release page to view its sales history. Marketplace data is not stored by this app.
 - Artwork is referenced by Discogs-hosted URLs and is not copied into local storage.
 - Credentials remain in Home Assistant app options and are not stored in the database or source repository.
-- This app does not request collection value or sales-history data and does not write to Discogs.
+- This app does not request or store collection valuation or sold-sales history and does not write to Discogs.
 - Listening history and play counts are not implemented yet; future custom apps can add their own tables in the shared DB with separate prefixes and migrations.
 
 ## Install
 
 1. Add this repository in **Settings → Apps → App store → Repositories**.
-2. Install or update **Discogs Connector** to version 0.3.0.
+2. Install or update **Discogs Connector** to version 0.4.0.
 3. In Configuration, confirm the username and enter your Discogs personal access token if needed; save and restart.
 4. Open the **Discogs Collection** panel and load or refresh your collection.
 5. In SQLite Web, set **Database** to `/share/home_apps.sqlite3`, save, and restart SQLite Web. You should then see the `discogs_` tables alongside other custom-app tables.
