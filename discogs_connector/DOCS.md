@@ -1,42 +1,45 @@
 # Home Assistant Discogs Connector
 
-A standalone Home Assistant app that provides an ingress collection browser for the Discogs account configured in the app options (default username: `IPAIRIS`).
+This Home Assistant app provides an ingress collection browser for the Discogs account configured in its options (default username: `IPAIRIS`).
 
-## Data and storage
+## Shared database and schema
 
-- Collection metadata is stored in SQLite at `/share/discogs_connector/discogs.sqlite3`, in Home Assistant's shared app folder. This location is readable by SQLite Web, which can open it by setting its **Database** option to this path.
-- The app migrates an existing `/data/discogs.sqlite3` database to the shared location on first startup after upgrading.
-- Collection refreshes replace the local collection snapshot so additions and removals are reflected. The default refresh/cache interval is four hours; use **Refresh collection** to fetch immediately.
-- Opening a release fetches its full Discogs release details, including the available tracklist, and saves that response in SQLite. The app reuses release details for the configured cache interval, then refreshes them when opened again.
-- Album artwork is referenced by Discogs-hosted image URLs and is not copied to local storage.
+The app stores its data in `/share/home_apps.sqlite3`, a shared custom-app database. It is separate from Home Assistant's recorder database. The tables owned by this app use the `discogs_` prefix; migration bookkeeping is in `app_schema_versions`, keyed by app ID. This lets other custom apps add their own namespaced tables to the same SQLite file without sharing ownership of schema changes. Each app must manage its own schema version and migrations.
+
+The schema is relational for searching and joins:
+
+- `discogs_releases` stores one row per Discogs release.
+- `discogs_collection_entries` stores your collection instances and folder/date-added fields.
+- `discogs_artists`, `discogs_release_artists`, `discogs_labels`, and `discogs_release_labels` store reusable artist/label records and release relationships.
+- `discogs_release_formats`, `discogs_format_descriptions`, and `discogs_release_classifications` store formats, genres, and styles.
+- `discogs_tracks`, `discogs_track_credits`, and `discogs_release_credits` store tracklists and credits when a release detail page is opened.
+- `discogs_release_payloads` retains the API response for cache reuse and fields not yet represented as columns. Normalized tables are the queryable representation for common lookups.
+- `discogs_collection_sync` records the latest collection refresh time and item count.
+
+Schema migrations do not use SQLite's file-global `PRAGMA user_version`, so one app will not overwrite another app's version marker. SQLite Web can view the shared file by setting its **Database** option to `/share/home_apps.sqlite3`; its Home Assistant app configuration provides one database path at a time.
+
+## Upgrade and data migration
+
+On first startup of version 0.3.0, the app preserves and imports existing Discogs data from `/share/discogs_connector/discogs.sqlite3` or `/data/discogs.sqlite3` into the shared database. Existing unrelated tables in `/share/home_apps.sqlite3` are left intact. If an old generic Discogs schema already exists in the shared file, it is imported and renamed with the `discogs_legacy_v1_` prefix after successful conversion. Do not delete old database files until the new app has started and the collection and release details are visible.
+
+## Collection data and refresh
+
+- A refresh replaces the locally stored collection snapshot so new additions and removals appear. The default cache interval is four hours; **Refresh collection** fetches immediately.
+- Opening a release fetches its full Discogs details, including available tracklist, credits, formats, genres, and styles. Those details are cached in SQLite and reused for the configured cache interval.
+- Artwork is referenced by Discogs-hosted URLs and is not copied into local storage.
 - Credentials remain in Home Assistant app options and are not stored in the database or source repository.
-- This version does not yet create listening-history or play-count records. The database is structured so a separate play-history table can be introduced with the future recognition integration.
-
-The collection and opened release metadata are retained until a later refresh replaces or updates them, or the local database is removed. The cache interval controls when the app requests newer Discogs data; it does not automatically delete all retained records at expiry. The shared folder can be accessed by apps that mount `/share` and may be exposed through a configured network file-sharing app, so do not store credentials or unrelated sensitive files there.
-
-## Features
-
-- Browse and search a collection by artist, release title, year, format, label, or catalog number.
-- Open a local release detail page with track positions, track lengths, labels, formats, genres, styles, credits, and available notes.
-- Refresh the paginated collection from Discogs on demand or when the stored snapshot expires.
-- Link to each Discogs release and attribute Discogs-provided information.
+- This app does not request collection value or sales-history data and does not write to Discogs.
+- Listening history and play counts are not implemented yet; future custom apps can add their own tables in the shared DB with separate prefixes and migrations.
 
 ## Install
 
 1. Add this repository in **Settings → Apps → App store → Repositories**.
-2. Install **Discogs Connector**.
-3. Open app Configuration; confirm the username and enter a Discogs personal access token.
-4. Save and start the app, then open its **Discogs Collection** panel.
+2. Install or update **Discogs Connector** to version 0.3.0.
+3. In Configuration, confirm the username and enter your Discogs personal access token if needed; save and restart.
+4. Open the **Discogs Collection** panel and load or refresh your collection.
+5. In SQLite Web, set **Database** to `/share/home_apps.sqlite3`, save, and restart SQLite Web. You should then see the `discogs_` tables alongside other custom-app tables.
 
 The app requires outbound HTTPS access to `api.discogs.com` and Discogs-hosted image URLs.
-
-## Limitations
-
-- No pricing or sales-history data is requested or stored.
-- No collection writes are made to Discogs.
-- Full release details are fetched only when a release is opened, rather than calling the release endpoint for every item during collection refresh.
-- Play-history capture and track matching are future work.
-- Recognition artwork in Turntable Recognition remains sourced independently from AudD.
 
 ## Attribution
 
