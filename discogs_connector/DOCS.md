@@ -28,7 +28,7 @@ On first startup of version 0.3.0, the app preserves and imports existing Discog
 - The app opens on **Overview**, with profile information and collection statistics such as record count, average recorded release year, year range, decade distribution, and top artists, genres, styles, formats, and labels.
 - **Collection** is a searchable table with fixed-size artwork. Select an album title to open its release detail page; the table omits external Discogs links to keep the columns focused.
 - A refresh updates the locally stored collection snapshot so additions and removals appear. Automatic refresh is enabled daily by default and can be disabled or set to an interval from 1 hour to 7 days in app Configuration. **Refresh collection** always fetches immediately.
-- The first collection load starts a background enrichment pass for missing release tracklists and master details. Requests are paced at about one per second; an initial collection of a few hundred records can take several minutes and may make one release request plus one master request per record. Existing cached rows are skipped, and new collection entries are enriched after later syncs. Progress and failures appear in the app log. Set `enrich_collection_details` to false to disable this pass.
+- The first collection load starts a background enrichment pass for missing release tracklists and master details. Requests are paced at about one per second; an initial collection of a few hundred records can take several minutes and may make one release request plus one master request per record. Existing cached rows are skipped, and new collection entries are enriched after later syncs. Invalid master IDs (including `0`) are ignored. Individual 404s are recorded and skipped; transient errors pause the pass and can be retried on the next collection load. App log entries include UTC timestamps and error context. Set `enrich_collection_details` to false to disable this pass.
 - Opening a release fetches its full Discogs details, including available tracklist, credits, formats, genres, and styles. Those details are cached in SQLite and reused for the configured cache interval.
 - The release detail view requests current marketplace listing stats when opened. It labels the lowest current asking price and number of active listings separately from sold prices. Discogs’ public API does not provide the last-30-sales low/median/high summary; use the linked Discogs release page to view its sales history. Marketplace data is not stored by this app.
 - Artwork is referenced by Discogs-hosted URLs and is not copied into local storage.
@@ -39,7 +39,7 @@ On first startup of version 0.3.0, the app preserves and imports existing Discog
 ## Install
 
 1. Add this repository in **Settings → Apps → App store → Repositories**.
-2. Install or update **Discogs Connector** to version 0.6.0.
+2. Install or update **Discogs Connector** to version 0.6.1.
 3. In Configuration, confirm the username and enter your Discogs personal access token if needed; save and restart.
 4. Open the **Discogs Collection** panel and load or refresh your collection.
 5. In SQLite Web, set **Database** to `/share/home_apps.sqlite3`, save, and restart SQLite Web. You should then see the `discogs_` tables alongside other custom-app tables.
@@ -49,3 +49,4 @@ The app requires outbound HTTPS access to `api.discogs.com` and Discogs-hosted i
 ## Attribution
 
 This application uses Discogs' API but is not affiliated with, sponsored, or endorsed by Discogs. Discogs is a trademark of Zink Media, LLC. Collection results and detail pages attribute and link to Discogs.
+
