@@ -1,35 +1,43 @@
 # Home Assistant Discogs Connector
 
-A standalone Home Assistant app that provides an ingress collection browser for the Discogs account `IPAIRIS`.
-Collection data is fetched from Discogs on demand and kept in process memory only. The app does not write collection
-records, artwork, or price history to `/data` or the repository. Its memory cache defaults to four hours (configurable
-from 15 to 300 minutes) and is cleared when the app restarts. The app refuses to present cached results after six hours.
+A standalone Home Assistant app that provides an ingress collection browser for the Discogs account configured in the app options (default username: `IPAIRIS`).
 
-## First version
+## Data and storage
+
+- Collection metadata is stored in SQLite at `/data/discogs.sqlite3`, inside the app's persistent data volume.
+- Collection refreshes replace the local collection snapshot so additions and removals are reflected. The default refresh/cache interval is four hours; use **Refresh collection** to fetch immediately.
+- Opening a release fetches its full Discogs release details, including the available tracklist, and saves that response in SQLite. The app reuses release details for the configured cache interval, then refreshes them when opened again.
+- Album artwork is referenced by Discogs-hosted image URLs and is not copied to local storage.
+- Credentials remain in Home Assistant app options and are not stored in the database or source repository.
+- This version does not yet create listening-history or play-count records. The database is structured so a separate play-history table can be introduced with the future recognition integration.
+
+The collection and opened release metadata are retained until a later refresh replaces or updates them, or the local database is removed. The cache interval controls when the app requests newer Discogs data; it does not automatically delete all retained records at expiry.
+
+## Features
 
 - Browse and search a collection by artist, release title, year, format, label, or catalog number.
-- Show Discogs-hosted thumbnail images with links to the source release and required attribution.
-- Refresh the complete collection on demand; the Discogs API response is paginated.
-- Keep authentication token in Home Assistant app options; never commit it.
-- No price lookups, price history, collection writes, or persistent database in this version.
+- Open a local release detail page with track positions, track lengths, labels, formats, genres, styles, credits, and available notes.
+- Refresh the paginated collection from Discogs on demand or when the stored snapshot expires.
+- Link to each Discogs release and attribute Discogs-provided information.
 
-## Install for local testing
+## Install
 
-1. Copy this folder into a Home Assistant add-on repository, or point a local app repository at it.
-2. Add that repository in **Settings → Apps → App store → Repositories**.
-3. Install **Discogs Connector**.
-4. Open app Configuration; confirm username `IPAIRIS` and enter the Discogs personal access token.
-5. Save and start the app, then open its **Discogs Collection** sidebar panel.
+1. Add this repository in **Settings → Apps → App store → Repositories**.
+2. Install **Discogs Connector**.
+3. Open app Configuration; confirm the username and enter a Discogs personal access token.
+4. Save and start the app, then open its **Discogs Collection** panel.
 
-The add-on requires outbound HTTPS access to `api.discogs.com` and Discogs-hosted image URLs.
+The app requires outbound HTTPS access to `api.discogs.com` and Discogs-hosted image URLs.
 
 ## Limitations
 
-The ingress view is the collection-search surface. This version does not create hundreds of recorder-backed entities in
-Home Assistant. It makes a live collection browser available inside Home Assistant without turning API results into a
-permanent local mirror. Recognition artwork in Turntable Recognition remains sourced independently from AudD.
+- No pricing or sales-history data is requested or stored.
+- No collection writes are made to Discogs.
+- Full release details are fetched only when a release is opened, rather than calling the release endpoint for every item during collection refresh.
+- Play-history capture and track matching are future work.
+- Recognition artwork in Turntable Recognition remains sourced independently from AudD.
 
 ## Attribution
 
-This application uses Discogs' API but is not affiliated with, sponsored, or endorsed by Discogs. Discogs is a trademark
-of Zink Media, LLC. Collection data is attributed and linked to its Discogs release page in the app.
+This application uses Discogs' API but is not affiliated with, sponsored, or endorsed by Discogs. Discogs is a trademark of Zink Media, LLC. Collection results and detail pages attribute and link to Discogs.
+
