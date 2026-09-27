@@ -7,4 +7,3 @@ The app is in [`discogs_connector/`](discogs_connector/). It provides a profile 
 Tables owned by this app use the `discogs_` prefix. The shared file is intended for separate custom apps to add their own namespaced tables and independently versioned migrations. It is separate from Home Assistant's recorder database. SQLite Web can inspect it by setting its Database option to `/share/home_apps.sqlite3`.
 
 Enter the Discogs personal access token in Home Assistant app Configuration after installation. Never commit tokens to source control.
-

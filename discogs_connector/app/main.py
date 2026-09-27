@@ -24,7 +24,6 @@ LEGACY_DATABASE_PATHS = (
 API_ROOT = "https://api.discogs.com"
 PORT = 8099
 MAX_PAGES = 100
-MAX_CACHE_AGE_SECONDS = 6 * 3600
 
 
 def read_options() -> dict[str, Any]:
@@ -38,7 +37,7 @@ class CollectionDatabase:
     """Shared SQLite file with namespaced Discogs tables and per-app migrations."""
 
     APP_ID = "discogs_connector"
-    SCHEMA_VERSION = 2
+    SCHEMA_VERSION = 3
 
     def __init__(self, path: Path, legacy_paths: tuple[Path, ...] = ()) -> None:
         self.path = path
@@ -96,6 +95,15 @@ class CollectionDatabase:
                 cover_image TEXT NOT NULL DEFAULT '',
                 notes TEXT,
                 fetched_at REAL
+            );
+            CREATE TABLE IF NOT EXISTS discogs_masters (
+                master_id INTEGER PRIMARY KEY,
+                title TEXT NOT NULL DEFAULT '',
+                year INTEGER,
+                main_release_id INTEGER,
+                artwork_url TEXT NOT NULL DEFAULT '',
+                thumb_url TEXT NOT NULL DEFAULT '',
+                fetched_at REAL NOT NULL
             );
             CREATE TABLE IF NOT EXISTS discogs_collection_entries (
                 instance_id INTEGER PRIMARY KEY,
@@ -490,8 +498,10 @@ class CollectionDatabase:
                 return [], None
             rows = connection.execute(
                 """SELECT e.instance_id, e.release_id, e.date_added, e.folder_id,
-                          r.title, r.year, r.thumb, r.cover_image, r.resource_url, r.uri
+                          r.title, r.year, r.thumb, r.cover_image, r.resource_url, r.uri,
+                          r.master_id, m.year AS master_year, m.artwork_url AS master_artwork_url
                    FROM discogs_collection_entries e JOIN discogs_releases r USING (release_id)
+                   LEFT JOIN discogs_masters m ON m.master_id = r.master_id
                    ORDER BY r.title COLLATE NOCASE"""
             ).fetchall()
             items = [dict(row) for row in rows]
@@ -553,6 +563,51 @@ class CollectionDatabase:
             return None
         return json.loads(row["payload_json"]), float(row["fetched_at"])
 
+    def collection_enrichment_queue(self, username: str) -> tuple[list[int], list[int]]:
+        with self.connect() as connection:
+            releases = [int(row[0]) for row in connection.execute(
+                """SELECT DISTINCT r.release_id FROM discogs_collection_entries e
+                   JOIN discogs_releases r USING (release_id)
+                   LEFT JOIN discogs_release_payloads p USING (release_id)
+                   WHERE p.release_id IS NULL ORDER BY r.release_id"""
+            )]
+            masters = [int(row[0]) for row in connection.execute(
+                """SELECT DISTINCT r.master_id FROM discogs_collection_entries e
+                   JOIN discogs_releases r USING (release_id)
+                   LEFT JOIN discogs_masters m ON m.master_id = r.master_id
+                   WHERE r.master_id IS NOT NULL AND m.master_id IS NULL ORDER BY r.master_id"""
+            )]
+        return releases, masters
+
+    def save_master(self, master_id: int, payload: dict[str, Any]) -> None:
+        images = payload.get("images") or []
+        image = next((item for item in images if item.get("type") == "primary"), None)
+        image = image or (images[0] if images else {})
+        with self.connect() as connection:
+            connection.execute(
+                """INSERT INTO discogs_masters
+                   (master_id, title, year, main_release_id, artwork_url, thumb_url, fetched_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(master_id) DO UPDATE SET
+                     title=excluded.title, year=COALESCE(excluded.year, discogs_masters.year),
+                     main_release_id=COALESCE(excluded.main_release_id, discogs_masters.main_release_id),
+                     artwork_url=CASE WHEN excluded.artwork_url='' THEN discogs_masters.artwork_url ELSE excluded.artwork_url END,
+                     thumb_url=CASE WHEN excluded.thumb_url='' THEN discogs_masters.thumb_url ELSE excluded.thumb_url END,
+                     fetched_at=excluded.fetched_at""",
+                (master_id, str(payload.get("title") or ""), payload.get("year"),
+                 payload.get("main_release"), str(image.get("uri") or ""),
+                 str(image.get("uri150") or ""), time.time()),
+            )
+
+    def master_details(self, master_id: int | None) -> dict[str, Any] | None:
+        if not master_id:
+            return None
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM discogs_masters WHERE master_id = ?", (master_id,)
+            ).fetchone()
+        return dict(row) if row else None
+
     def save_release_details(
         self, release_id: int, payload: dict[str, Any], *,
         connection: sqlite3.Connection | None = None, fetched_at: float | None = None,
@@ -581,38 +636,80 @@ class CollectionClient:
         options = read_options()
         self.username = str(options.get("discogs_username") or "IPAIRIS").strip()
         self.token = str(options.get("discogs_token") or "").strip()
-        self.ttl_seconds = max(900, min(18000, int(options.get("cache_ttl_minutes", 240)) * 60))
+        self.refresh_schedule_enabled = bool(options.get("refresh_schedule_enabled", True))
+        self.refresh_interval_seconds = max(3600, min(604800, int(options.get("refresh_interval_hours", 24)) * 3600))
         self.database = CollectionDatabase(DATABASE_PATH, LEGACY_DATABASE_PATHS)
         self.session = requests.Session()
         self.session.headers.update({
-            "User-Agent": "HomeAssistantDiscogsConnector/0.4.1 (personal collection browser)",
+            "User-Agent": "HomeAssistantDiscogsConnector/0.6.0 (personal collection browser)",
             "Accept": "application/vnd.discogs.v2.plain+json",
         })
         if self.token:
             self.session.headers["Authorization"] = f"Discogs token={self.token}"
         self._lock = threading.Lock()
+        self.enrichment_enabled = bool(options.get("enrich_collection_details", True))
+        self._enrichment_thread: threading.Thread | None = None
 
     def status(self) -> dict[str, Any]:
         _items, sync = self.database.collection_snapshot(self.username)
         age = int(time.time() - sync["synced_at"]) if sync else None
-        fresh_enough_to_show = age is not None and age < MAX_CACHE_AGE_SECONDS
         return {
             "username": self.username,
-            "loaded": bool(fresh_enough_to_show),
-            "count": sync["total"] if fresh_enough_to_show else 0,
+            "loaded": sync is not None,
+            "count": sync["total"] if sync else 0,
             "age_seconds": age,
-            "cache_ttl_seconds": self.ttl_seconds,
+            "refresh_schedule_enabled": self.refresh_schedule_enabled,
+            "refresh_interval_hours": self.refresh_interval_seconds // 3600,
             "token_configured": bool(self.token),
             "storage": "sqlite",
         }
+
+    def start_collection_enrichment(self) -> None:
+        if not self.enrichment_enabled or not self.token:
+            return
+        if self._enrichment_thread and self._enrichment_thread.is_alive():
+            return
+        self._enrichment_thread = threading.Thread(
+            target=self._enrich_collection_metadata,
+            name="discogs-collection-enrichment", daemon=True,
+        )
+        self._enrichment_thread.start()
+
+    def _enrich_collection_metadata(self) -> None:
+        releases, masters = self.database.collection_enrichment_queue(self.username)
+        if not releases and not masters:
+            return
+        session = requests.Session()
+        session.headers.update(self.session.headers)
+        try:
+            total = len(releases) + len(masters)
+            complete = 0
+            for release_id in releases:
+                response = session.get(f"{API_ROOT}/releases/{release_id}", timeout=30)
+                response.raise_for_status()
+                self.database.save_release_details(release_id, response.json())
+                complete += 1
+                print(f"Discogs collection metadata: {complete}/{total} releases/masters", flush=True)
+                time.sleep(1.1)
+            for master_id in masters:
+                response = session.get(f"{API_ROOT}/masters/{master_id}", timeout=30)
+                response.raise_for_status()
+                self.database.save_master(master_id, response.json())
+                complete += 1
+                print(f"Discogs collection metadata: {complete}/{total} releases/masters", flush=True)
+                time.sleep(1.1)
+        except Exception as exc:
+            print(f"Discogs collection metadata enrichment paused: {exc}", flush=True)
+        finally:
+            session.close()
 
     def collection(self, force: bool = False) -> dict[str, Any]:
         if not self.token:
             raise RuntimeError("Add your Discogs personal access token in the app Configuration, then restart the app.")
         with self._lock:
             cached_items, sync = self.database.collection_snapshot(self.username)
-            age = time.time() - sync["synced_at"] if sync else None
-            if not force and sync and age is not None and age < self.ttl_seconds:
+            if not force and sync:
+                self.start_collection_enrichment()
                 return {"items": cached_items, "status": self.status()}
 
             items: list[dict[str, Any]] = []
@@ -661,6 +758,7 @@ class CollectionClient:
                 page += 1
 
             self.database.replace_collection(self.username, items, total or len(items))
+            self.start_collection_enrichment()
             return {"items": items, "status": self.status()}
 
     def overview(self) -> dict[str, Any]:
@@ -730,13 +828,15 @@ class CollectionClient:
         if not self.token:
             raise RuntimeError("Add your Discogs personal access token in the app Configuration, then restart the app.")
         cached = self.database.release_details(release_id)
-        if cached and not force and time.time() - cached[1] < self.ttl_seconds:
-            return {"release": cached[0], "age_seconds": int(time.time() - cached[1]), "cached": True}
+        if cached and not force:
+            return {"release": cached[0], "master": self.database.master_details(cached[0].get("master_id")),
+                    "age_seconds": int(time.time() - cached[1]), "cached": True}
         response = self.session.get(f"{API_ROOT}/releases/{release_id}", timeout=30)
         response.raise_for_status()
         payload = response.json()
         fetched_at = self.database.save_release_details(release_id, payload)
-        return {"release": payload, "age_seconds": int(time.time() - fetched_at), "cached": False}
+        return {"release": payload, "master": self.database.master_details(payload.get("master_id")),
+                "age_seconds": int(time.time() - fetched_at), "cached": False}
 
 
 CLIENT: CollectionClient | None = None
@@ -747,6 +847,25 @@ def get_client() -> CollectionClient:
     if CLIENT is None:
         CLIENT = CollectionClient()
     return CLIENT
+
+
+def start_scheduled_collection_refresh(client: CollectionClient) -> threading.Thread | None:
+    """Refresh the collection at a configured interval; manual refresh stays available."""
+    if not client.refresh_schedule_enabled or not client.token:
+        return None
+
+    def refresh_loop() -> None:
+        while True:
+            time.sleep(client.refresh_interval_seconds)
+            try:
+                result = client.collection(force=True)
+                print(f"Scheduled Discogs collection refresh complete: {result['status']['count']} records", flush=True)
+            except Exception as exc:
+                print(f"Scheduled Discogs collection refresh failed: {exc}", flush=True)
+
+    worker = threading.Thread(target=refresh_loop, name="discogs-scheduled-collection-refresh", daemon=True)
+    worker.start()
+    return worker
 
 
 PAGE = r"""<!doctype html>
@@ -769,7 +888,7 @@ button{padding:10px 16px;border:0;border-radius:8px;font:inherit;cursor:pointer}
 <script>
 let rows=[]; const esc=s=>String(s??'').replace(/[&<>\"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;',"'":'&#39;'}[c]));
 function render(){const q=document.querySelector('#query').value.trim().toLocaleLowerCase();const found=rows.filter(x=>[x.artist,x.title,x.year,...x.formats,...x.labels,...x.catalog_numbers].join(' ').toLocaleLowerCase().includes(q));
- document.querySelector('#results').innerHTML=found.length?found.map(x=>`<tr><td>${x.thumb?`<img class="cover" loading="lazy" src="${esc(x.thumb)}" alt="Cover for ${esc(x.title)}">`:'<div class="cover"></div>'}</td><td class="title"><a href="#release/${encodeURIComponent(x.release_id)}">${esc(x.title)}</a></td><td>${esc(x.artist)}</td><td>${esc(x.year||'—')}</td><td>${esc(x.formats.join(', ')||'—')}</td><td>${esc([...x.labels,...x.catalog_numbers].join(' · ')||'—')}</td></tr>`).join(''):'<tr><td colspan="6" class="muted">No matching records</td></tr>';
+document.querySelector('#results').innerHTML=found.length?found.map(x=>`<tr><td>${x.thumb?`<img class="cover" loading="lazy" src="${esc(x.thumb)}" alt="Cover for ${esc(x.title)}">`:'<div class="cover"></div>'}</td><td class="title"><a href="#release/${encodeURIComponent(x.release_id)}">${esc(x.title)}</a></td><td>${esc(x.artist)}</td><td>${esc(x.year||'—')}${x.master_year?`<div class="sub">Master ${esc(x.master_year)}</div>`:''}</td><td>${esc(x.formats.join(', ')||'—')}</td><td>${esc([...x.labels,...x.catalog_numbers].join(' · ')||'—')}</td></tr>`).join(''):'<tr><td colspan="6" class="muted">No matching records</td></tr>';
  document.querySelector('#count').textContent=`${found.length} of ${rows.length} records`;
 }
 function list(items){return items?.length?`<ol class="list">${items.map(x=>`<li>${esc(x.name)} <span class="muted">(${esc(x.count)})</span></li>`).join('')}</ol>`:'<p class="muted">No data available</p>';}
@@ -886,5 +1005,5 @@ class Handler(BaseHTTPRequestHandler):
 if __name__ == "__main__":
     client = get_client()
     print(f"Discogs Connector listening on {PORT}; user={client.username}; token_configured={bool(client.token)}", flush=True)
+    start_scheduled_collection_refresh(client)
     ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
-

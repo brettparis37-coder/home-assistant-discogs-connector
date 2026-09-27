@@ -41,6 +41,13 @@ class FakeSession:
                 "username": "IPAIRIS", "name": "Record Collector", "location": "California",
                 "registered": "2010-01-01 00:00:00", "profile": "A Discogs profile",
             })
+        if "/masters/" in url:
+            return FakeResponse({
+                "id": int(url.rsplit("/", 1)[1]), "title": "Master album", "year": 1969,
+                "main_release": 101,
+                "images": [{"type": "primary", "uri": "https://img.discogs.com/master.jpg",
+                            "uri150": "https://img.discogs.com/master150.jpg"}],
+            })
         if "/releases/" in url:
             release_id = int(url.rsplit("/", 1)[1])
             return FakeResponse({
@@ -76,6 +83,9 @@ class FakeSession:
         }
         return FakeResponse({"pagination": {"pages": 2, "items": 2}, "releases": [row] if page <= 2 else []})
 
+    def close(self) -> None:
+        return None
+
 
 def load_module():
     fake_requests = types.ModuleType("requests")
@@ -102,7 +112,7 @@ class CollectionClientTests(unittest.TestCase):
         root = Path(self.temp.name)
         self.options_path = root / "options.json"
         self.options_path.write_text(
-            '{"discogs_username":"IPAIRIS","discogs_token":"test-only","cache_ttl_minutes":240}',
+            '{"discogs_username":"IPAIRIS","discogs_token":"test-only","refresh_schedule_enabled":false,"refresh_interval_hours":24,"enrich_collection_details":false}',
             encoding="utf-8",
         )
         self.module = load_module()
@@ -143,16 +153,19 @@ class CollectionClientTests(unittest.TestCase):
             self.assertEqual(db.execute("SELECT name FROM discogs_artists WHERE discogs_artist_id=31").fetchone()[0], "Artist 1")
             self.assertEqual(db.execute("SELECT catalog_number FROM discogs_release_labels WHERE release_id=101").fetchone()[0], "CAT-1")
             self.assertEqual(db.execute("SELECT value FROM discogs_release_classifications WHERE release_id=101 AND kind='style'").fetchone()[0], "Alternative Rock")
-            self.assertEqual(db.execute("SELECT version FROM app_schema_versions WHERE app_id='discogs_connector'").fetchone()[0], 2)
+            self.assertEqual(db.execute("SELECT version FROM app_schema_versions WHERE app_id='discogs_connector'").fetchone()[0], 3)
         with sqlite3.connect(self.database_path) as db:
             db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         self.client.database = None
 
-    def test_reuses_fresh_sqlite_cache_unless_forced(self) -> None:
+    def test_reuses_cached_collection_until_forced_refresh(self) -> None:
         self.client.collection()
+        with sqlite3.connect(self.database_path) as db:
+            db.execute("UPDATE discogs_collection_sync SET synced_at = 1")
         cached = self.client.collection()
         self.assertEqual(len(self.client.session.calls), 2)
         self.assertEqual(len(cached["items"]), 2)
+        self.assertTrue(cached["status"]["loaded"])
         self.client.collection(force=True)
         self.assertEqual(len(self.client.session.calls), 4)
 
@@ -179,6 +192,33 @@ class CollectionClientTests(unittest.TestCase):
         cached = restarted.release(101)
         self.assertTrue(cached["cached"])
         self.assertEqual(restarted.session.calls, [])
+
+    def test_master_details_preserve_original_year_and_artwork(self) -> None:
+        self.client.database.save_master(901, {
+            "title": "Master album", "year": 1969, "main_release": 101,
+            "images": [{"type": "primary", "uri": "https://img.discogs.com/master.jpg",
+                        "uri150": "https://img.discogs.com/master150.jpg"}],
+        })
+        master = self.client.database.master_details(901)
+        self.assertEqual(master["year"], 1969)
+        self.assertEqual(master["artwork_url"], "https://img.discogs.com/master.jpg")
+        self.assertEqual(master["thumb_url"], "https://img.discogs.com/master150.jpg")
+
+    def test_enrichment_queue_only_contains_missing_collection_data(self) -> None:
+        self.client.collection()
+        releases, masters = self.client.database.collection_enrichment_queue("IPAIRIS")
+        self.assertEqual(releases, [101, 102])
+        self.assertEqual(masters, [901, 902])
+
+    def test_background_enrichment_populates_tracks_and_master_data(self) -> None:
+        self.client.enrichment_enabled = True
+        with patch.object(self.module.time, "sleep", return_value=None):
+            self.client.collection()
+            self.client._enrichment_thread.join(timeout=3)
+        self.assertFalse(self.client._enrichment_thread.is_alive())
+        with sqlite3.connect(self.database_path) as db:
+            self.assertEqual(db.execute("SELECT title FROM discogs_tracks WHERE release_id=101 AND sequence=1").fetchone()[0], "Opening Track")
+            self.assertEqual(db.execute("SELECT year FROM discogs_masters WHERE master_id=901").fetchone()[0], 1969)
 
     def test_overview_builds_collection_insights_and_loads_profile(self) -> None:
         self.client.collection()
@@ -240,4 +280,3 @@ class CollectionClientTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

@@ -12,7 +12,8 @@ The schema is relational for searching and joins:
 - `discogs_collection_entries` stores your collection instances and folder/date-added fields.
 - `discogs_artists`, `discogs_release_artists`, `discogs_labels`, and `discogs_release_labels` store reusable artist/label records and release relationships.
 - `discogs_release_formats`, `discogs_format_descriptions`, and `discogs_release_classifications` store formats, genres, and styles.
-- `discogs_tracks`, `discogs_track_credits`, and `discogs_release_credits` store tracklists and credits when a release detail page is opened.
+- `discogs_tracks`, `discogs_track_credits`, and `discogs_release_credits` store cached tracklists and credits for releases in your collection.
+- `discogs_masters` stores each master release's year and primary artwork URL; release-specific year and artwork remain on `discogs_releases`.
 - `discogs_release_payloads` retains the API response for cache reuse and fields not yet represented as columns. Normalized tables are the queryable representation for common lookups.
 - `discogs_collection_sync` records the latest collection refresh time and item count.
 
@@ -26,7 +27,8 @@ On first startup of version 0.3.0, the app preserves and imports existing Discog
 
 - The app opens on **Overview**, with profile information and collection statistics such as record count, average recorded release year, year range, decade distribution, and top artists, genres, styles, formats, and labels.
 - **Collection** is a searchable table with fixed-size artwork. Select an album title to open its release detail page; the table omits external Discogs links to keep the columns focused.
-- A refresh replaces the locally stored collection snapshot so new additions and removals appear. The default cache interval is four hours; **Refresh collection** fetches immediately.
+- A refresh updates the locally stored collection snapshot so additions and removals appear. Automatic refresh is enabled daily by default and can be disabled or set to an interval from 1 hour to 7 days in app Configuration. **Refresh collection** always fetches immediately.
+- The first collection load starts a background enrichment pass for missing release tracklists and master details. Requests are paced at about one per second; an initial collection of a few hundred records can take several minutes and may make one release request plus one master request per record. Existing cached rows are skipped, and new collection entries are enriched after later syncs. Progress and failures appear in the app log. Set `enrich_collection_details` to false to disable this pass.
 - Opening a release fetches its full Discogs details, including available tracklist, credits, formats, genres, and styles. Those details are cached in SQLite and reused for the configured cache interval.
 - The release detail view requests current marketplace listing stats when opened. It labels the lowest current asking price and number of active listings separately from sold prices. Discogs’ public API does not provide the last-30-sales low/median/high summary; use the linked Discogs release page to view its sales history. Marketplace data is not stored by this app.
 - Artwork is referenced by Discogs-hosted URLs and is not copied into local storage.
@@ -37,7 +39,7 @@ On first startup of version 0.3.0, the app preserves and imports existing Discog
 ## Install
 
 1. Add this repository in **Settings → Apps → App store → Repositories**.
-2. Install or update **Discogs Connector** to version 0.4.1.
+2. Install or update **Discogs Connector** to version 0.6.0.
 3. In Configuration, confirm the username and enter your Discogs personal access token if needed; save and restart.
 4. Open the **Discogs Collection** panel and load or refresh your collection.
 5. In SQLite Web, set **Database** to `/share/home_apps.sqlite3`, save, and restart SQLite Web. You should then see the `discogs_` tables alongside other custom-app tables.
@@ -47,4 +49,3 @@ The app requires outbound HTTPS access to `api.discogs.com` and Discogs-hosted i
 ## Attribution
 
 This application uses Discogs' API but is not affiliated with, sponsored, or endorsed by Discogs. Discogs is a trademark of Zink Media, LLC. Collection results and detail pages attribute and link to Discogs.
-
