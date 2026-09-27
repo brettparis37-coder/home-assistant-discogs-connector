@@ -96,11 +96,15 @@ class CollectionClientTests(unittest.TestCase):
         self.database_path = Path(self.temp.name) / "discogs.sqlite3"
         self.database_patch = patch.object(self.module, "DATABASE_PATH", self.database_path)
         self.database_patch.start()
+        self.legacy_database_path = Path(self.temp.name) / "legacy.sqlite3"
+        self.legacy_database_patch = patch.object(self.module, "LEGACY_DATABASE_PATH", self.legacy_database_path)
+        self.legacy_database_patch.start()
         self.client = self.module.CollectionClient()
 
     def tearDown(self) -> None:
         self.client_patch.stop()
         self.database_patch.stop()
+        self.legacy_database_patch.stop()
         self.temp.cleanup()
 
     def test_fetches_all_pages_and_normalizes_fields(self) -> None:
@@ -134,6 +138,19 @@ class CollectionClientTests(unittest.TestCase):
         cached = restarted.release(101)
         self.assertTrue(cached["cached"])
         self.assertEqual(restarted.session.calls, [])
+
+    def test_migrates_existing_database_to_shared_location(self) -> None:
+        previous_path = Path(self.temp.name) / "previous.sqlite3"
+        previous = self.module.CollectionDatabase(previous_path)
+        previous.replace_collection("IPAIRIS", [{
+            "instance_id": 501, "release_id": 101, "title": "Kept Album", "artist": "Kept Artist",
+            "formats": ["Vinyl"], "labels": [], "catalog_numbers": [],
+        }], 1)
+        migrated_path = Path(self.temp.name) / "migrated.sqlite3"
+        migrated = self.module.CollectionDatabase(migrated_path, previous_path)
+        items, sync = migrated.collection_snapshot("IPAIRIS")
+        self.assertEqual(items[0]["title"], "Kept Album")
+        self.assertIsNotNone(sync)
 
     def test_requires_token(self) -> None:
         self.client.token = ""
