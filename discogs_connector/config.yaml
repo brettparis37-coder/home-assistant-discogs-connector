@@ -1,0 +1,23 @@
+name: Discogs Connector
+version: "0.1.0"
+slug: discogs_connector
+description: Search your Discogs collection from a private Home Assistant panel.
+startup: application
+boot: auto
+init: false
+arch:
+  - amd64
+  - aarch64
+ingress: true
+ingress_port: 8099
+panel_icon: mdi:disc
+panel_title: Discogs Collection
+panel_admin: false
+options:
+  discogs_username: IPAIRIS
+  discogs_token: ""
+  cache_ttl_minutes: 240
+schema:
+  discogs_username: str
+  discogs_token: password
+  cache_ttl_minutes: int(15,300)
