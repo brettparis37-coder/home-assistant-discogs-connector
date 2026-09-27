@@ -7,7 +7,9 @@ import json
 import sqlite3
 import threading
 import time
+import traceback
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Iterator
@@ -26,6 +28,28 @@ PORT = 8099
 MAX_PAGES = 100
 
 
+def log(message: str, *, error: BaseException | None = None) -> None:
+    """Write timestamped, actionable app logs without exposing request headers."""
+    timestamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    if error is None:
+        print(f"[{timestamp}] {message}", flush=True)
+        return
+    response = getattr(error, "response", None)
+    request = getattr(error, "request", None)
+    details = [f"{type(error).__name__}: {error}"]
+    if response is not None:
+        details.append(f"HTTP {getattr(response, 'status_code', '?')}")
+        url = getattr(response, "url", None) or getattr(request, "url", None)
+        if url:
+            details.append(f"url={url}")
+        body = str(getattr(response, "text", "") or "").strip()
+        if body:
+            details.append(f"response={body[:500]}")
+    print(f"[{timestamp}] ERROR {message}: {'; '.join(details)}", flush=True)
+    if not isinstance(error, requests.HTTPError):
+        traceback.print_exception(type(error), error, error.__traceback__)
+
+
 def read_options() -> dict[str, Any]:
     try:
         return json.loads(OPTIONS_PATH.read_text(encoding="utf-8"))
@@ -37,7 +61,7 @@ class CollectionDatabase:
     """Shared SQLite file with namespaced Discogs tables and per-app migrations."""
 
     APP_ID = "discogs_connector"
-    SCHEMA_VERSION = 3
+    SCHEMA_VERSION = 4
 
     def __init__(self, path: Path, legacy_paths: tuple[Path, ...] = ()) -> None:
         self.path = path
@@ -104,6 +128,14 @@ class CollectionDatabase:
                 artwork_url TEXT NOT NULL DEFAULT '',
                 thumb_url TEXT NOT NULL DEFAULT '',
                 fetched_at REAL NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS discogs_metadata_failures (
+                entity_type TEXT NOT NULL CHECK (entity_type IN ('release', 'master')),
+                entity_id INTEGER NOT NULL,
+                status_code INTEGER NOT NULL,
+                attempted_at REAL NOT NULL,
+                message TEXT NOT NULL DEFAULT '',
+                PRIMARY KEY (entity_type, entity_id)
             );
             CREATE TABLE IF NOT EXISTS discogs_collection_entries (
                 instance_id INTEGER PRIMARY KEY,
@@ -569,15 +601,44 @@ class CollectionDatabase:
                 """SELECT DISTINCT r.release_id FROM discogs_collection_entries e
                    JOIN discogs_releases r USING (release_id)
                    LEFT JOIN discogs_release_payloads p USING (release_id)
-                   WHERE p.release_id IS NULL ORDER BY r.release_id"""
+                   WHERE p.release_id IS NULL
+                     AND NOT EXISTS (
+                       SELECT 1 FROM discogs_metadata_failures f
+                       WHERE f.entity_type='release' AND f.entity_id=r.release_id
+                     )
+                   ORDER BY r.release_id"""
             )]
             masters = [int(row[0]) for row in connection.execute(
                 """SELECT DISTINCT r.master_id FROM discogs_collection_entries e
                    JOIN discogs_releases r USING (release_id)
                    LEFT JOIN discogs_masters m ON m.master_id = r.master_id
-                   WHERE r.master_id IS NOT NULL AND m.master_id IS NULL ORDER BY r.master_id"""
+                   WHERE r.master_id > 0 AND m.master_id IS NULL
+                     AND NOT EXISTS (
+                       SELECT 1 FROM discogs_metadata_failures f
+                       WHERE f.entity_type='master' AND f.entity_id=r.master_id
+                     )
+                   ORDER BY r.master_id"""
             )]
         return releases, masters
+
+    def save_metadata_not_found(self, entity_type: str, entity_id: int, message: str) -> None:
+        with self.connect() as connection:
+            connection.execute(
+                """INSERT INTO discogs_metadata_failures
+                   (entity_type, entity_id, status_code, attempted_at, message)
+                   VALUES (?, ?, 404, ?, ?)
+                   ON CONFLICT(entity_type, entity_id) DO UPDATE SET
+                     status_code=excluded.status_code, attempted_at=excluded.attempted_at,
+                     message=excluded.message""",
+                (entity_type, entity_id, time.time(), message[:500]),
+            )
+
+    def clear_metadata_failure(self, entity_type: str, entity_id: int) -> None:
+        with self.connect() as connection:
+            connection.execute(
+                "DELETE FROM discogs_metadata_failures WHERE entity_type=? AND entity_id=?",
+                (entity_type, entity_id),
+            )
 
     def save_master(self, master_id: int, payload: dict[str, Any]) -> None:
         images = payload.get("images") or []
@@ -678,28 +739,42 @@ class CollectionClient:
     def _enrich_collection_metadata(self) -> None:
         releases, masters = self.database.collection_enrichment_queue(self.username)
         if not releases and not masters:
+            log("Discogs collection metadata enrichment: nothing pending")
             return
         session = requests.Session()
         session.headers.update(self.session.headers)
         try:
             total = len(releases) + len(masters)
             complete = 0
-            for release_id in releases:
-                response = session.get(f"{API_ROOT}/releases/{release_id}", timeout=30)
-                response.raise_for_status()
-                self.database.save_release_details(release_id, response.json())
-                complete += 1
-                print(f"Discogs collection metadata: {complete}/{total} releases/masters", flush=True)
-                time.sleep(1.1)
-            for master_id in masters:
-                response = session.get(f"{API_ROOT}/masters/{master_id}", timeout=30)
-                response.raise_for_status()
-                self.database.save_master(master_id, response.json())
-                complete += 1
-                print(f"Discogs collection metadata: {complete}/{total} releases/masters", flush=True)
-                time.sleep(1.1)
-        except Exception as exc:
-            print(f"Discogs collection metadata enrichment paused: {exc}", flush=True)
+            for entity_type, entity_ids in (("release", releases), ("master", masters)):
+                for entity_id in entity_ids:
+                    url = f"{API_ROOT}/{entity_type}s/{entity_id}"
+                    try:
+                        response = session.get(url, timeout=30)
+                        response.raise_for_status()
+                        payload = response.json()
+                        if entity_type == "release":
+                            self.database.save_release_details(entity_id, payload)
+                        else:
+                            self.database.save_master(entity_id, payload)
+                        self.database.clear_metadata_failure(entity_type, entity_id)
+                        complete += 1
+                        log(f"Discogs collection metadata: {complete}/{total} releases/masters")
+                    except requests.HTTPError as exc:
+                        response = exc.response
+                        status = response.status_code if response is not None else None
+                        if status == 404:
+                            self.database.save_metadata_not_found(entity_type, entity_id, str(exc))
+                            log(f"Discogs {entity_type} metadata not found; skipping and continuing (id={entity_id})", error=exc)
+                            complete += 1
+                            time.sleep(1.1)
+                            continue
+                        log(f"Discogs {entity_type} metadata failed; pausing enrichment (id={entity_id})", error=exc)
+                        return
+                    except Exception as exc:
+                        log(f"Discogs {entity_type} metadata failed; pausing enrichment (id={entity_id}, url={url})", error=exc)
+                        return
+                    time.sleep(1.1)
         finally:
             session.close()
 
@@ -859,9 +934,9 @@ def start_scheduled_collection_refresh(client: CollectionClient) -> threading.Th
             time.sleep(client.refresh_interval_seconds)
             try:
                 result = client.collection(force=True)
-                print(f"Scheduled Discogs collection refresh complete: {result['status']['count']} records", flush=True)
+                log(f"Scheduled Discogs collection refresh complete: {result['status']['count']} records")
             except Exception as exc:
-                print(f"Scheduled Discogs collection refresh failed: {exc}", flush=True)
+                log("Scheduled Discogs collection refresh failed", error=exc)
 
     worker = threading.Thread(target=refresh_loop, name="discogs-scheduled-collection-refresh", daemon=True)
     worker.start()
@@ -920,9 +995,10 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 self.send_json(200, get_client().collection(force=force))
             except requests.HTTPError as exc:
+                log("Discogs collection request failed", error=exc)
                 self.send_json(502, {"error": self.discogs_error(exc)})
             except (requests.RequestException, ValueError) as exc:
-                print(f"Discogs collection request failed: {exc}", flush=True)
+                log("Discogs collection request failed", error=exc)
                 self.send_json(502, {"error": "Could not reach Discogs. Check the app log and try again."})
             except RuntimeError as exc:
                 self.send_json(400, {"error": str(exc)})
@@ -931,9 +1007,10 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 self.send_json(200, get_client().overview())
             except requests.HTTPError as exc:
+                log("Discogs profile request failed", error=exc)
                 self.send_json(502, {"error": self.discogs_error(exc)})
             except (requests.RequestException, ValueError) as exc:
-                print(f"Discogs profile request failed: {exc}", flush=True)
+                log("Discogs profile request failed", error=exc)
                 self.send_json(502, {"error": "Could not load your Discogs profile. Check the app log and try again."})
             except RuntimeError as exc:
                 self.send_json(400, {"error": str(exc)})
@@ -946,9 +1023,10 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 self.send_json(200, {"stats": get_client().marketplace_stats(int(raw_id))})
             except requests.HTTPError as exc:
+                log("Discogs marketplace stats request failed", error=exc)
                 self.send_json(502, {"error": self.discogs_error(exc)})
             except (requests.RequestException, ValueError) as exc:
-                print(f"Discogs marketplace stats request failed: {exc}", flush=True)
+                log("Discogs marketplace stats request failed", error=exc)
                 self.send_json(502, {"error": "Could not load current listing information."})
             except RuntimeError as exc:
                 self.send_json(400, {"error": str(exc)})
@@ -961,9 +1039,10 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 self.send_json(200, get_client().release(int(raw_id)))
             except requests.HTTPError as exc:
+                log("Discogs release request failed", error=exc)
                 self.send_json(502, {"error": self.discogs_error(exc)})
             except (requests.RequestException, ValueError) as exc:
-                print(f"Discogs release request failed: {exc}", flush=True)
+                log("Discogs release request failed", error=exc)
                 self.send_json(502, {"error": "Could not load release details. Check the app log and try again."})
             except RuntimeError as exc:
                 self.send_json(400, {"error": str(exc)})
@@ -999,11 +1078,12 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def log_message(self, fmt: str, *args: Any) -> None:
-        print("Discogs Connector: " + fmt % args, flush=True)
+        log("Discogs Connector: " + fmt % args)
 
 
 if __name__ == "__main__":
     client = get_client()
-    print(f"Discogs Connector listening on {PORT}; user={client.username}; token_configured={bool(client.token)}", flush=True)
+    log(f"Discogs Connector listening on {PORT}; user={client.username}; token_configured={bool(client.token)}")
     start_scheduled_collection_refresh(client)
     ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
+
