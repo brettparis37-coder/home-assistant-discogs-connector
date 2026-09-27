@@ -16,8 +16,11 @@ from urllib.parse import urlparse
 import requests
 
 OPTIONS_PATH = Path("/data/options.json")
-DATABASE_PATH = Path("/share/discogs_connector/discogs.sqlite3")
-LEGACY_DATABASE_PATH = Path("/data/discogs.sqlite3")
+DATABASE_PATH = Path("/share/home_apps.sqlite3")
+LEGACY_DATABASE_PATHS = (
+    Path("/share/discogs_connector/discogs.sqlite3"),
+    Path("/data/discogs.sqlite3"),
+)
 API_ROOT = "https://api.discogs.com"
 PORT = 8099
 MAX_PAGES = 100
@@ -32,63 +35,30 @@ def read_options() -> dict[str, Any]:
 
 
 class CollectionDatabase:
-    """Small, versioned SQLite store for collection snapshots and release detail."""
+    """Shared SQLite file with namespaced Discogs tables and per-app migrations."""
 
-    def __init__(self, path: Path, legacy_path: Path | None = None) -> None:
+    APP_ID = "discogs_connector"
+    SCHEMA_VERSION = 2
+
+    def __init__(self, path: Path, legacy_paths: tuple[Path, ...] = ()) -> None:
         self.path = path
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        if legacy_path and legacy_path != path and not path.exists() and legacy_path.is_file():
-            legacy_connection = sqlite3.connect(legacy_path, timeout=15)
-            new_connection = sqlite3.connect(path, timeout=15)
-            try:
-                legacy_connection.backup(new_connection)
-            finally:
-                new_connection.close()
-                legacy_connection.close()
+        self.legacy_paths = tuple(p for p in legacy_paths if p != path)
+        setup = sqlite3.connect(self.path, timeout=20)
+        try:
+            setup.execute("PRAGMA busy_timeout = 20000")
+            setup.execute("PRAGMA journal_mode = WAL")
+        finally:
+            setup.close()
         with self.connect() as connection:
-            version = int(connection.execute("PRAGMA user_version").fetchone()[0])
-            if version > 1:
-                raise RuntimeError(f"Database version {version} is newer than this app supports.")
-            connection.executescript(
-                """
-                CREATE TABLE IF NOT EXISTS collection_sync (
-                    id INTEGER PRIMARY KEY CHECK (id = 1),
-                    username TEXT NOT NULL,
-                    synced_at REAL NOT NULL,
-                    total INTEGER NOT NULL
-                );
-                CREATE TABLE IF NOT EXISTS collection_entries (
-                    instance_id INTEGER PRIMARY KEY,
-                    release_id INTEGER NOT NULL,
-                    title TEXT NOT NULL,
-                    artist TEXT NOT NULL,
-                    year INTEGER,
-                    formats_json TEXT NOT NULL,
-                    labels_json TEXT NOT NULL,
-                    catalog_numbers_json TEXT NOT NULL,
-                    thumb TEXT NOT NULL,
-                    cover_image TEXT NOT NULL,
-                    resource_url TEXT NOT NULL,
-                    uri TEXT NOT NULL,
-                    date_added TEXT NOT NULL,
-                    folder_id INTEGER
-                );
-                CREATE INDEX IF NOT EXISTS idx_collection_release_id
-                    ON collection_entries(release_id);
-                CREATE TABLE IF NOT EXISTS release_details (
-                    release_id INTEGER PRIMARY KEY,
-                    fetched_at REAL NOT NULL,
-                    payload_json TEXT NOT NULL
-                );
-                """
-            )
-            if version < 1:
-                connection.execute("PRAGMA user_version = 1")
+            self._create_schema(connection)
+            self._migrate(connection)
 
     @contextmanager
     def connect(self) -> Iterator[sqlite3.Connection]:
-        connection = sqlite3.connect(self.path, timeout=15)
+        connection = sqlite3.connect(self.path, timeout=20)
         connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA busy_timeout = 20000")
         connection.execute("PRAGMA foreign_keys = ON")
         try:
             yield connection
@@ -99,44 +69,470 @@ class CollectionDatabase:
         finally:
             connection.close()
 
+    @staticmethod
+    def _create_schema(connection: sqlite3.Connection) -> None:
+        connection.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS app_schema_versions (
+                app_id TEXT PRIMARY KEY,
+                version INTEGER NOT NULL,
+                updated_at REAL NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS discogs_collection_sync (
+                username TEXT PRIMARY KEY,
+                synced_at REAL NOT NULL,
+                total INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS discogs_releases (
+                release_id INTEGER PRIMARY KEY,
+                master_id INTEGER,
+                title TEXT NOT NULL,
+                year INTEGER,
+                country TEXT,
+                released TEXT,
+                uri TEXT NOT NULL DEFAULT '',
+                resource_url TEXT NOT NULL DEFAULT '',
+                thumb TEXT NOT NULL DEFAULT '',
+                cover_image TEXT NOT NULL DEFAULT '',
+                notes TEXT,
+                fetched_at REAL
+            );
+            CREATE TABLE IF NOT EXISTS discogs_collection_entries (
+                instance_id INTEGER PRIMARY KEY,
+                release_id INTEGER NOT NULL REFERENCES discogs_releases(release_id),
+                date_added TEXT NOT NULL DEFAULT '',
+                folder_id INTEGER
+            );
+            CREATE INDEX IF NOT EXISTS idx_discogs_collection_release
+                ON discogs_collection_entries(release_id);
+            CREATE TABLE IF NOT EXISTS discogs_artists (
+                artist_key INTEGER PRIMARY KEY,
+                discogs_artist_id INTEGER UNIQUE,
+                name TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_discogs_artist_name ON discogs_artists(name COLLATE NOCASE);
+            CREATE TABLE IF NOT EXISTS discogs_release_artists (
+                release_id INTEGER NOT NULL REFERENCES discogs_releases(release_id) ON DELETE CASCADE,
+                position INTEGER NOT NULL,
+                artist_key INTEGER NOT NULL REFERENCES discogs_artists(artist_key),
+                anv TEXT NOT NULL DEFAULT '',
+                join_text TEXT NOT NULL DEFAULT '',
+                role TEXT NOT NULL DEFAULT '',
+                PRIMARY KEY (release_id, position)
+            );
+            CREATE TABLE IF NOT EXISTS discogs_labels (
+                label_key INTEGER PRIMARY KEY,
+                discogs_label_id INTEGER UNIQUE,
+                name TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_discogs_label_name ON discogs_labels(name COLLATE NOCASE);
+            CREATE TABLE IF NOT EXISTS discogs_release_labels (
+                release_id INTEGER NOT NULL REFERENCES discogs_releases(release_id) ON DELETE CASCADE,
+                position INTEGER NOT NULL,
+                label_key INTEGER NOT NULL REFERENCES discogs_labels(label_key),
+                catalog_number TEXT NOT NULL DEFAULT '',
+                PRIMARY KEY (release_id, position)
+            );
+            CREATE INDEX IF NOT EXISTS idx_discogs_catalog_number
+                ON discogs_release_labels(catalog_number COLLATE NOCASE);
+            CREATE TABLE IF NOT EXISTS discogs_release_formats (
+                release_id INTEGER NOT NULL REFERENCES discogs_releases(release_id) ON DELETE CASCADE,
+                position INTEGER NOT NULL,
+                name TEXT NOT NULL,
+                quantity TEXT NOT NULL DEFAULT '',
+                format_text TEXT NOT NULL DEFAULT '',
+                PRIMARY KEY (release_id, position)
+            );
+            CREATE TABLE IF NOT EXISTS discogs_format_descriptions (
+                release_id INTEGER NOT NULL,
+                format_position INTEGER NOT NULL,
+                position INTEGER NOT NULL,
+                description TEXT NOT NULL,
+                PRIMARY KEY (release_id, format_position, position),
+                FOREIGN KEY (release_id, format_position)
+                    REFERENCES discogs_release_formats(release_id, position) ON DELETE CASCADE
+            );
+            CREATE TABLE IF NOT EXISTS discogs_release_classifications (
+                release_id INTEGER NOT NULL REFERENCES discogs_releases(release_id) ON DELETE CASCADE,
+                kind TEXT NOT NULL CHECK (kind IN ('genre', 'style')),
+                value TEXT NOT NULL,
+                PRIMARY KEY (release_id, kind, value)
+            );
+            CREATE INDEX IF NOT EXISTS idx_discogs_classification_value
+                ON discogs_release_classifications(kind, value COLLATE NOCASE);
+            CREATE TABLE IF NOT EXISTS discogs_tracks (
+                track_key TEXT PRIMARY KEY,
+                release_id INTEGER NOT NULL REFERENCES discogs_releases(release_id) ON DELETE CASCADE,
+                sequence INTEGER NOT NULL,
+                discogs_track_id TEXT,
+                position TEXT NOT NULL DEFAULT '',
+                title TEXT NOT NULL DEFAULT '',
+                duration TEXT NOT NULL DEFAULT '',
+                duration_ms INTEGER,
+                track_type TEXT NOT NULL DEFAULT 'track',
+                parent_sequence INTEGER,
+                UNIQUE (release_id, sequence)
+            );
+            CREATE INDEX IF NOT EXISTS idx_discogs_track_title
+                ON discogs_tracks(title COLLATE NOCASE);
+            CREATE INDEX IF NOT EXISTS idx_discogs_track_release_order
+                ON discogs_tracks(release_id, sequence);
+            CREATE TABLE IF NOT EXISTS discogs_track_credits (
+                track_key TEXT NOT NULL REFERENCES discogs_tracks(track_key) ON DELETE CASCADE,
+                position INTEGER NOT NULL,
+                artist_key INTEGER NOT NULL REFERENCES discogs_artists(artist_key),
+                role TEXT NOT NULL DEFAULT '',
+                PRIMARY KEY (track_key, position)
+            );
+            CREATE TABLE IF NOT EXISTS discogs_release_credits (
+                release_id INTEGER NOT NULL REFERENCES discogs_releases(release_id) ON DELETE CASCADE,
+                position INTEGER NOT NULL,
+                artist_key INTEGER NOT NULL REFERENCES discogs_artists(artist_key),
+                role TEXT NOT NULL DEFAULT '',
+                PRIMARY KEY (release_id, position)
+            );
+            CREATE TABLE IF NOT EXISTS discogs_release_payloads (
+                release_id INTEGER PRIMARY KEY REFERENCES discogs_releases(release_id) ON DELETE CASCADE,
+                fetched_at REAL NOT NULL,
+                payload_json TEXT NOT NULL
+            );
+            """
+        )
+
+    @staticmethod
+    def _tables(connection: sqlite3.Connection, schema: str = "main") -> set[str]:
+        return {row[0] for row in connection.execute(
+            f"SELECT name FROM {schema}.sqlite_master WHERE type='table'"
+        )}
+
+    @staticmethod
+    def _columns(connection: sqlite3.Connection, table: str) -> set[str]:
+        return {row[1] for row in connection.execute(f"PRAGMA table_info({table})")}
+
+    def _migrate(self, connection: sqlite3.Connection) -> None:
+        row = connection.execute(
+            "SELECT version FROM app_schema_versions WHERE app_id = ?", (self.APP_ID,)
+        ).fetchone()
+        version = int(row["version"]) if row else 0
+        if version > self.SCHEMA_VERSION:
+            raise RuntimeError(f"Discogs schema version {version} is newer than this app supports.")
+        if version == 0:
+            if self._is_legacy_schema(connection):
+                connection.execute("BEGIN")
+                self._import_legacy_tables(connection, "main")
+                self._archive_legacy_tables(connection)
+            else:
+                for legacy_path in self.legacy_paths:
+                    if legacy_path.is_file():
+                        connection.execute("BEGIN")
+                        self._import_legacy_file(connection, legacy_path)
+                        break
+                self._archive_legacy_tables(connection)
+            self._set_schema_version(connection, self.SCHEMA_VERSION)
+        elif version < self.SCHEMA_VERSION:
+            self._set_schema_version(connection, self.SCHEMA_VERSION)
+
+    @staticmethod
+    def _archive_legacy_tables(connection: sqlite3.Connection) -> None:
+        """Keep a namespaced copy of legacy tables after normalized migration."""
+        for table in ("collection_sync", "collection_entries", "release_details"):
+            if table in CollectionDatabase._tables(connection):
+                archived = f"discogs_legacy_v1_{table}"
+                if archived not in CollectionDatabase._tables(connection):
+                    connection.execute(f"ALTER TABLE {table} RENAME TO {archived}")
+
+    @staticmethod
+    def _is_legacy_schema(connection: sqlite3.Connection, schema: str = "main") -> bool:
+        tables = CollectionDatabase._tables(connection, schema)
+        return "collection_entries" in tables and {
+            "instance_id", "release_id", "formats_json", "labels_json", "catalog_numbers_json"
+        }.issubset(CollectionDatabase._columns(connection, "collection_entries"))
+
+    def _set_schema_version(self, connection: sqlite3.Connection, version: int) -> None:
+        connection.execute(
+            """INSERT INTO app_schema_versions (app_id, version, updated_at) VALUES (?, ?, ?)
+               ON CONFLICT(app_id) DO UPDATE SET version=excluded.version, updated_at=excluded.updated_at""",
+            (self.APP_ID, version, time.time()),
+        )
+
+    def _import_legacy_file(self, connection: sqlite3.Connection, path: Path) -> None:
+        source = sqlite3.connect(path, timeout=15)
+        source.row_factory = sqlite3.Row
+        try:
+            source_tables = self._tables(source)
+            if "collection_entries" not in source_tables:
+                return
+            sync_row = source.execute("SELECT * FROM collection_sync LIMIT 1").fetchone() if "collection_sync" in source_tables else None
+            entry_rows = source.execute("SELECT * FROM collection_entries").fetchall()
+            details = source.execute("SELECT * FROM release_details").fetchall() if "release_details" in source_tables else []
+            self._import_legacy_rows(connection, entry_rows, sync_row, details)
+        finally:
+            source.close()
+
+    def _import_legacy_tables(self, connection: sqlite3.Connection, schema: str) -> None:
+        sync_row = None
+        if "collection_sync" in self._tables(connection, schema):
+            sync_row = connection.execute(f"SELECT * FROM {schema}.collection_sync LIMIT 1").fetchone()
+        entry_rows = connection.execute(f"SELECT * FROM {schema}.collection_entries").fetchall()
+        details = connection.execute(f"SELECT * FROM {schema}.release_details").fetchall() if "release_details" in self._tables(connection, schema) else []
+        self._import_legacy_rows(connection, entry_rows, sync_row, details)
+
+    def _import_legacy_rows(
+        self,
+        connection: sqlite3.Connection,
+        entry_rows: list[sqlite3.Row],
+        sync_row: sqlite3.Row | None,
+        details: list[sqlite3.Row],
+    ) -> None:
+        import itertools
+        for entry in entry_rows:
+            row = dict(entry)
+            release_id = int(row["release_id"])
+            label_names = json.loads(row.get("labels_json") or "[]")
+            catalog_numbers = json.loads(row.get("catalog_numbers_json") or "[]")
+            labels = [
+                {"name": name, "catno": catno}
+                for name, catno in itertools.zip_longest(label_names, catalog_numbers, fillvalue="")
+                if name or catno
+            ]
+            self._save_release_metadata(connection, {
+                "id": release_id, "title": row.get("title", ""), "year": row.get("year"),
+                "artists": ([{"name": row["artist"]}] if row.get("artist") else []),
+                "labels": labels,
+                "formats": [{"name": value} for value in json.loads(row.get("formats_json") or "[]")],
+                "thumb": row.get("thumb", ""), "cover_image": row.get("cover_image", ""),
+                "resource_url": row.get("resource_url", ""), "uri": row.get("uri", ""),
+            })
+            connection.execute(
+                """INSERT OR REPLACE INTO discogs_collection_entries
+                   (instance_id, release_id, date_added, folder_id) VALUES (?, ?, ?, ?)""",
+                (row.get("instance_id") or release_id, release_id, row.get("date_added", ""), row.get("folder_id")),
+            )
+        if sync_row:
+            sync = dict(sync_row)
+            username = sync.get("username", "IPAIRIS")
+            connection.execute(
+                """INSERT OR REPLACE INTO discogs_collection_sync (username, synced_at, total) VALUES (?, ?, ?)""",
+                (username, sync.get("synced_at", time.time()), sync.get("total", len(entry_rows))),
+            )
+        for detail in details:
+            row = dict(detail)
+            try:
+                payload = json.loads(row["payload_json"])
+            except (KeyError, json.JSONDecodeError, TypeError):
+                continue
+            self.save_release_details(int(row["release_id"]), payload, connection=connection,
+                                      fetched_at=float(row.get("fetched_at", time.time())))
+
+    @staticmethod
+    def _duration_milliseconds(duration: str) -> int | None:
+        if not duration:
+            return None
+        try:
+            parts = [int(part) for part in duration.split(":")]
+            total = 0
+            for part in parts:
+                total = total * 60 + part
+            return total * 1000
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _artist_key(connection: sqlite3.Connection, artist: dict[str, Any]) -> int:
+        name = str(artist.get("name") or "Unknown artist")
+        discogs_id = artist.get("id")
+        if discogs_id not in (None, 0, "0", ""):
+            connection.execute(
+                """INSERT INTO discogs_artists (discogs_artist_id, name) VALUES (?, ?)
+                   ON CONFLICT(discogs_artist_id) DO UPDATE SET name=excluded.name""",
+                (int(discogs_id), name),
+            )
+            return int(connection.execute(
+                "SELECT artist_key FROM discogs_artists WHERE discogs_artist_id = ?", (int(discogs_id),)
+            ).fetchone()[0])
+        existing = connection.execute(
+            "SELECT artist_key FROM discogs_artists WHERE discogs_artist_id IS NULL AND name = ?", (name,)
+        ).fetchone()
+        if existing:
+            return int(existing[0])
+        cursor = connection.execute(
+            "INSERT INTO discogs_artists (discogs_artist_id, name) VALUES (NULL, ?)", (name,)
+        )
+        return int(cursor.lastrowid)
+
+    @staticmethod
+    def _label_key(connection: sqlite3.Connection, label: dict[str, Any]) -> int:
+        name = str(label.get("name") or "Unknown label")
+        discogs_id = label.get("id")
+        if discogs_id not in (None, 0, "0", ""):
+            connection.execute(
+                """INSERT INTO discogs_labels (discogs_label_id, name) VALUES (?, ?)
+                   ON CONFLICT(discogs_label_id) DO UPDATE SET name=excluded.name""",
+                (int(discogs_id), name),
+            )
+            return int(connection.execute(
+                "SELECT label_key FROM discogs_labels WHERE discogs_label_id = ?", (int(discogs_id),)
+            ).fetchone()[0])
+        existing = connection.execute(
+            "SELECT label_key FROM discogs_labels WHERE discogs_label_id IS NULL AND name = ?", (name,)
+        ).fetchone()
+        if existing:
+            return int(existing[0])
+        cursor = connection.execute(
+            "INSERT INTO discogs_labels (discogs_label_id, name) VALUES (NULL, ?)", (name,)
+        )
+        return int(cursor.lastrowid)
+
+    def _save_release_metadata(
+        self, connection: sqlite3.Connection, release: dict[str, Any], fetched_at: float | None = None
+    ) -> None:
+        release_id = int(release["id"])
+        connection.execute(
+            """INSERT INTO discogs_releases (
+                 release_id, master_id, title, year, country, released, uri, resource_url, thumb, cover_image, notes, fetched_at
+               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(release_id) DO UPDATE SET
+                 master_id=COALESCE(excluded.master_id, discogs_releases.master_id),
+                 title=excluded.title, year=COALESCE(excluded.year, discogs_releases.year),
+                 country=COALESCE(excluded.country, discogs_releases.country),
+                 released=COALESCE(excluded.released, discogs_releases.released),
+                 uri=CASE WHEN excluded.uri='' THEN discogs_releases.uri ELSE excluded.uri END,
+                 resource_url=CASE WHEN excluded.resource_url='' THEN discogs_releases.resource_url ELSE excluded.resource_url END,
+                 thumb=CASE WHEN excluded.thumb='' THEN discogs_releases.thumb ELSE excluded.thumb END,
+                 cover_image=CASE WHEN excluded.cover_image='' THEN discogs_releases.cover_image ELSE excluded.cover_image END,
+                 notes=COALESCE(excluded.notes, discogs_releases.notes),
+                 fetched_at=COALESCE(excluded.fetched_at, discogs_releases.fetched_at)""",
+            (release_id, release.get("master_id"), str(release.get("title") or ""), release.get("year"),
+             release.get("country"), release.get("released"), release.get("uri") or "",
+             release.get("resource_url") or "", release.get("thumb") or "", release.get("cover_image") or "",
+             release.get("notes"), fetched_at),
+        )
+        for table in ("discogs_release_artists", "discogs_release_labels", "discogs_release_formats",
+                      "discogs_release_classifications"):
+            connection.execute(f"DELETE FROM {table} WHERE release_id = ?", (release_id,))
+        for position, artist in enumerate(release.get("artists") or []):
+            artist_key = self._artist_key(connection, artist)
+            connection.execute(
+                """INSERT INTO discogs_release_artists
+                   (release_id, position, artist_key, anv, join_text, role) VALUES (?, ?, ?, ?, ?, ?)""",
+                (release_id, position, artist_key, artist.get("anv") or "", artist.get("join") or "", artist.get("role") or ""),
+            )
+        for position, label in enumerate(release.get("labels") or []):
+            label_key = self._label_key(connection, label)
+            connection.execute(
+                """INSERT INTO discogs_release_labels
+                   (release_id, position, label_key, catalog_number) VALUES (?, ?, ?, ?)""",
+                (release_id, position, label_key, label.get("catno") or ""),
+            )
+        for position, fmt in enumerate(release.get("formats") or []):
+            connection.execute(
+                """INSERT INTO discogs_release_formats
+                   (release_id, position, name, quantity, format_text) VALUES (?, ?, ?, ?, ?)""",
+                (release_id, position, fmt.get("name") or "", str(fmt.get("qty") or ""), fmt.get("text") or ""),
+            )
+            connection.executemany(
+                """INSERT INTO discogs_format_descriptions
+                   (release_id, format_position, position, description) VALUES (?, ?, ?, ?)""",
+                [(release_id, position, desc_position, desc)
+                 for desc_position, desc in enumerate(fmt.get("descriptions") or [])],
+            )
+        for kind, values in (("genre", release.get("genres") or []), ("style", release.get("styles") or [])):
+            connection.executemany(
+                "INSERT INTO discogs_release_classifications (release_id, kind, value) VALUES (?, ?, ?)",
+                [(release_id, kind, value) for value in dict.fromkeys(values)],
+            )
+
+    def _save_full_release(self, connection: sqlite3.Connection, payload: dict[str, Any], fetched_at: float) -> None:
+        release_id = int(payload["id"])
+        self._save_release_metadata(connection, payload, fetched_at)
+        connection.execute("DELETE FROM discogs_track_credits WHERE track_key IN (SELECT track_key FROM discogs_tracks WHERE release_id=?)", (release_id,))
+        connection.execute("DELETE FROM discogs_tracks WHERE release_id = ?", (release_id,))
+        connection.execute("DELETE FROM discogs_release_credits WHERE release_id = ?", (release_id,))
+
+        def insert_track_items(items: list[dict[str, Any]], parent_sequence: int | None = None) -> None:
+            for item in items:
+                sequence = int(connection.execute(
+                    "SELECT COALESCE(MAX(sequence), 0) + 1 FROM discogs_tracks WHERE release_id = ?", (release_id,)
+                ).fetchone()[0])
+                discogs_track_id = str(item.get("id") or "")
+                track_key = f"{release_id}:{discogs_track_id}" if discogs_track_id else f"{release_id}:sequence:{sequence}"
+                duration = str(item.get("duration") or "")
+                track_type = str(item.get("type_") or item.get("type") or "track")
+                connection.execute(
+                    """INSERT INTO discogs_tracks
+                       (track_key, release_id, sequence, discogs_track_id, position, title, duration, duration_ms, track_type, parent_sequence)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (track_key, release_id, sequence, discogs_track_id or None, item.get("position") or "",
+                     item.get("title") or "", duration, self._duration_milliseconds(duration), track_type, parent_sequence),
+                )
+                for credit_position, artist in enumerate(item.get("artists") or []):
+                    artist_key = self._artist_key(connection, artist)
+                    connection.execute(
+                        "INSERT INTO discogs_track_credits (track_key, position, artist_key, role) VALUES (?, ?, ?, ?)",
+                        (track_key, credit_position, artist_key, artist.get("role") or ""),
+                    )
+                insert_track_items(item.get("sub_tracks") or [], sequence)
+
+        insert_track_items(payload.get("tracklist") or [])
+        for position, artist in enumerate(payload.get("extraartists") or []):
+            artist_key = self._artist_key(connection, artist)
+            connection.execute(
+                "INSERT INTO discogs_release_credits (release_id, position, artist_key, role) VALUES (?, ?, ?, ?)",
+                (release_id, position, artist_key, artist.get("role") or ""),
+            )
+
     def collection_snapshot(self, username: str) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
         with self.connect() as connection:
-            sync = connection.execute("SELECT * FROM collection_sync WHERE id = 1").fetchone()
-            if sync is None or sync["username"].casefold() != username.casefold():
+            sync = connection.execute(
+                "SELECT * FROM discogs_collection_sync WHERE username = ?", (username,)
+            ).fetchone()
+            if sync is None:
                 return [], None
-            entries = connection.execute(
-                "SELECT * FROM collection_entries ORDER BY artist COLLATE NOCASE, title COLLATE NOCASE"
+            rows = connection.execute(
+                """SELECT e.instance_id, e.release_id, e.date_added, e.folder_id,
+                          r.title, r.year, r.thumb, r.cover_image, r.resource_url, r.uri
+                   FROM discogs_collection_entries e JOIN discogs_releases r USING (release_id)
+                   ORDER BY r.title COLLATE NOCASE"""
             ).fetchall()
-        items = []
-        for entry in entries:
-            row = dict(entry)
-            for field in ("formats", "labels", "catalog_numbers"):
-                row[field] = json.loads(row.pop(f"{field}_json"))
-            items.append(row)
+            items = [dict(row) for row in rows]
+            for row in items:
+                rid = row["release_id"]
+                row["artist"] = ", ".join(item[0] for item in connection.execute(
+                    """SELECT a.name FROM discogs_release_artists ra JOIN discogs_artists a USING (artist_key)
+                       WHERE ra.release_id=? ORDER BY ra.position""", (rid,)))
+                label_rows = connection.execute(
+                    """SELECT l.name, rl.catalog_number FROM discogs_release_labels rl
+                       JOIN discogs_labels l USING (label_key) WHERE rl.release_id=? ORDER BY rl.position""", (rid,)
+                ).fetchall()
+                row["labels"] = [item["name"] for item in label_rows]
+                row["catalog_numbers"] = [item["catalog_number"] for item in label_rows if item["catalog_number"]]
+                row["formats"] = [item[0] for item in connection.execute(
+                    "SELECT name FROM discogs_release_formats WHERE release_id=? ORDER BY position", (rid,))]
         return items, {"synced_at": float(sync["synced_at"]), "total": int(sync["total"])}
 
     def replace_collection(self, username: str, items: list[dict[str, Any]], total: int) -> float:
         now = time.time()
         with self.connect() as connection:
-            connection.execute("DELETE FROM collection_entries")
-            connection.executemany(
-                """INSERT INTO collection_entries (
-                    instance_id, release_id, title, artist, year, formats_json, labels_json,
-                    catalog_numbers_json, thumb, cover_image, resource_url, uri, date_added, folder_id
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                [(
-                    item.get("instance_id") or item.get("release_id"), item.get("release_id"),
-                    item.get("title", ""), item.get("artist", ""), item.get("year"),
-                    json.dumps(item.get("formats", [])), json.dumps(item.get("labels", [])),
-                    json.dumps(item.get("catalog_numbers", [])), item.get("thumb", ""),
-                    item.get("cover_image", ""), item.get("resource_url", ""), item.get("uri", ""),
-                    item.get("date_added", ""), item.get("folder_id"),
-                ) for item in items],
-            )
+            connection.execute("DELETE FROM discogs_collection_entries")
+            for item in items:
+                release = {
+                    "id": item.get("release_id"), "title": item.get("title", ""), "year": item.get("year"),
+                    "artists": item.get("artists", []), "labels": item.get("raw_labels", []),
+                    "formats": item.get("raw_formats", []), "genres": item.get("genres", []),
+                    "styles": item.get("styles", []), "thumb": item.get("thumb", ""),
+                    "cover_image": item.get("cover_image", ""), "resource_url": item.get("resource_url", ""),
+                    "uri": item.get("uri", ""), "master_id": item.get("master_id"),
+                }
+                self._save_release_metadata(connection, release)
+                connection.execute(
+                    """INSERT OR REPLACE INTO discogs_collection_entries
+                       (instance_id, release_id, date_added, folder_id) VALUES (?, ?, ?, ?)""",
+                    (item.get("instance_id") or item.get("release_id"), item.get("release_id"),
+                     item.get("date_added", ""), item.get("folder_id")),
+                )
             connection.execute(
-                """INSERT INTO collection_sync (id, username, synced_at, total) VALUES (1, ?, ?, ?)
-                   ON CONFLICT(id) DO UPDATE SET username=excluded.username,
-                     synced_at=excluded.synced_at, total=excluded.total""",
+                """INSERT INTO discogs_collection_sync (username, synced_at, total) VALUES (?, ?, ?)
+                   ON CONFLICT(username) DO UPDATE SET synced_at=excluded.synced_at, total=excluded.total""",
                 (username, now, total),
             )
         return now
@@ -144,23 +540,33 @@ class CollectionDatabase:
     def release_details(self, release_id: int) -> tuple[dict[str, Any], float] | None:
         with self.connect() as connection:
             row = connection.execute(
-                "SELECT payload_json, fetched_at FROM release_details WHERE release_id = ?",
-                (release_id,),
+                "SELECT payload_json, fetched_at FROM discogs_release_payloads WHERE release_id = ?", (release_id,)
             ).fetchone()
         if row is None:
             return None
         return json.loads(row["payload_json"]), float(row["fetched_at"])
 
-    def save_release_details(self, release_id: int, payload: dict[str, Any]) -> float:
-        fetched_at = time.time()
-        with self.connect() as connection:
-            connection.execute(
-                """INSERT INTO release_details (release_id, fetched_at, payload_json) VALUES (?, ?, ?)
-                   ON CONFLICT(release_id) DO UPDATE SET fetched_at=excluded.fetched_at,
-                     payload_json=excluded.payload_json""",
-                (release_id, fetched_at, json.dumps(payload, ensure_ascii=False)),
-            )
+    def save_release_details(
+        self, release_id: int, payload: dict[str, Any], *,
+        connection: sqlite3.Connection | None = None, fetched_at: float | None = None,
+    ) -> float:
+        fetched_at = fetched_at or time.time()
+        if connection is None:
+            with self.connect() as active:
+                self._store_release_details(active, release_id, payload, fetched_at)
+        else:
+            self._store_release_details(connection, release_id, payload, fetched_at)
         return fetched_at
+
+    def _store_release_details(
+        self, connection: sqlite3.Connection, release_id: int, payload: dict[str, Any], fetched_at: float
+    ) -> None:
+        self._save_full_release(connection, payload, fetched_at)
+        connection.execute(
+            """INSERT INTO discogs_release_payloads (release_id, fetched_at, payload_json) VALUES (?, ?, ?)
+               ON CONFLICT(release_id) DO UPDATE SET fetched_at=excluded.fetched_at, payload_json=excluded.payload_json""",
+            (release_id, fetched_at, json.dumps(payload, ensure_ascii=False)),
+        )
 
 
 class CollectionClient:
@@ -169,10 +575,10 @@ class CollectionClient:
         self.username = str(options.get("discogs_username") or "IPAIRIS").strip()
         self.token = str(options.get("discogs_token") or "").strip()
         self.ttl_seconds = max(900, min(18000, int(options.get("cache_ttl_minutes", 240)) * 60))
-        self.database = CollectionDatabase(DATABASE_PATH, LEGACY_DATABASE_PATH)
+        self.database = CollectionDatabase(DATABASE_PATH, LEGACY_DATABASE_PATHS)
         self.session = requests.Session()
         self.session.headers.update({
-            "User-Agent": "HomeAssistantDiscogsConnector/0.2.0 (personal collection browser)",
+            "User-Agent": "HomeAssistantDiscogsConnector/0.3.0 (personal collection browser)",
             "Accept": "application/vnd.discogs.v2.plain+json",
         })
         if self.token:
@@ -230,6 +636,12 @@ class CollectionClient:
                         "artist": artists_text,
                         "year": release.get("year"),
                         "formats": [f.get("name", "") for f in formats if f.get("name")],
+                        "artists": release.get("artists") or [],
+                        "raw_labels": labels,
+                        "raw_formats": formats,
+                        "genres": release.get("genres") or [],
+                        "styles": release.get("styles") or [],
+                        "master_id": release.get("master_id"),
                         "labels": [l.get("name", "") for l in labels if l.get("name")],
                         "catalog_numbers": [l.get("catno", "") for l in labels if l.get("catno")],
                         "thumb": release.get("thumb") or "",
