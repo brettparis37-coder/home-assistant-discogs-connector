@@ -1,8 +1,10 @@
-"""Unit tests for pagination, SQLite storage, and release detail caching."""
+"""Tests for Discogs pagination, shared storage, normalization, and migrations."""
 
 from __future__ import annotations
 
 import importlib.util
+import gc
+import sqlite3
 import sys
 import tempfile
 import types
@@ -32,35 +34,37 @@ class FakeSession:
         if "/releases/" in url:
             release_id = int(url.rsplit("/", 1)[1])
             return FakeResponse({
-                "id": release_id,
-                "title": "Album detail",
-                "artists": [{"name": "Artist Detail"}],
+                "id": release_id, "title": "Album detail", "year": 1971,
+                "artists": [{"id": 11, "name": "Artist Detail"}],
+                "labels": [{"id": 21, "name": "Detail Label", "catno": "DL-1"}],
+                "formats": [{"name": "Vinyl", "qty": "1", "descriptions": ["LP", "Album"]}],
+                "genres": ["Rock"], "styles": ["Prog Rock"],
+                "extraartists": [{"id": 12, "name": "Guest", "role": "Vocals"}],
                 "tracklist": [
-                    {"position": "A1", "title": "Opening Track", "duration": "3:21"},
-                    {"position": "A2", "title": "Second Track", "duration": "4:02"},
+                    {"id": "t1", "position": "A1", "title": "Opening Track", "duration": "3:21",
+                     "artists": [{"id": 13, "name": "Track Guest", "role": "guitar"}]},
+                    {"id": "t2", "position": "A2", "title": "Second Track", "duration": "4:02"},
                 ],
-                "genres": ["Rock"],
             })
         assert params is not None
         page = params["page"]
         row = {
-            "instance_id": page,
+            "instance_id": 500 + page,
             "date_added": "2026-09-01T00:00:00-00:00",
             "basic_information": {
-                "id": 100 + page,
-                "title": f"Album {page}",
-                "year": 1970 + page,
-                "artists": [{"name": f"Artist {page}"}],
-                "labels": [{"name": "Example Label", "catno": f"CAT-{page}"}],
-                "formats": [{"name": "Vinyl"}],
+                "id": 100 + page, "master_id": 900 + page,
+                "title": f"Album {page}", "year": 1970 + page,
+                "artists": [{"id": 30 + page, "name": f"Artist {page}", "anv": "A. Name", "join": "&"}],
+                "labels": [{"id": 40, "name": "Example Label", "catno": f"CAT-{page}"}],
+                "formats": [{"name": "Vinyl", "qty": "1", "descriptions": ["LP"]}],
+                "genres": ["Rock"], "styles": ["Alternative Rock"],
                 "thumb": "https://img.discogs.com/thumb.jpg",
+                "cover_image": "https://img.discogs.com/cover.jpg",
+                "resource_url": f"https://api.discogs.com/releases/{100 + page}",
                 "uri": f"/release/{100 + page}-Album-{page}",
             },
         }
-        return FakeResponse({
-            "pagination": {"pages": 2, "items": 2},
-            "releases": [row] if page <= 2 else [],
-        })
+        return FakeResponse({"pagination": {"pages": 2, "items": 2}, "releases": [row] if page <= 2 else []})
 
 
 def load_module():
@@ -85,26 +89,37 @@ def load_module():
 class CollectionClientTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
-        self.options_path = Path(self.temp.name) / "options.json"
+        root = Path(self.temp.name)
+        self.options_path = root / "options.json"
         self.options_path.write_text(
             '{"discogs_username":"IPAIRIS","discogs_token":"test-only","cache_ttl_minutes":240}',
             encoding="utf-8",
         )
         self.module = load_module()
-        self.client_patch = patch.object(self.module, "OPTIONS_PATH", self.options_path)
-        self.client_patch.start()
-        self.database_path = Path(self.temp.name) / "discogs.sqlite3"
-        self.database_patch = patch.object(self.module, "DATABASE_PATH", self.database_path)
-        self.database_patch.start()
-        self.legacy_database_path = Path(self.temp.name) / "legacy.sqlite3"
-        self.legacy_database_patch = patch.object(self.module, "LEGACY_DATABASE_PATH", self.legacy_database_path)
-        self.legacy_database_patch.start()
+        self.patches = [
+            patch.object(self.module, "OPTIONS_PATH", self.options_path),
+            patch.object(self.module, "DATABASE_PATH", root / "home_apps.sqlite3"),
+            patch.object(self.module, "LEGACY_DATABASE_PATHS", (root / "legacy.sqlite3",)),
+        ]
+        for item in self.patches:
+            item.start()
+        self.database_path = root / "home_apps.sqlite3"
+        self.legacy_path = root / "legacy.sqlite3"
         self.client = self.module.CollectionClient()
 
     def tearDown(self) -> None:
-        self.client_patch.stop()
-        self.database_patch.stop()
-        self.legacy_database_patch.stop()
+        for attr in ("client",):
+            if hasattr(self, attr):
+                db = getattr(self, attr).database
+                try:
+                    with db.connect() as connection:
+                        connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                except Exception:
+                    pass
+                setattr(getattr(self, attr), "database", None)
+        for item in reversed(self.patches):
+            item.stop()
+        gc.collect()
         self.temp.cleanup()
 
     def test_fetches_all_pages_and_normalizes_fields(self) -> None:
@@ -113,7 +128,15 @@ class CollectionClientTests(unittest.TestCase):
         self.assertEqual(result["status"]["count"], 2)
         self.assertEqual(result["items"][0]["artist"], "Artist 1")
         self.assertEqual(result["items"][0]["catalog_numbers"], ["CAT-1"])
-        self.assertEqual(result["items"][1]["release_id"], 102)
+        with sqlite3.connect(self.database_path) as db:
+            self.assertEqual(db.execute("SELECT title FROM discogs_releases WHERE release_id=101").fetchone()[0], "Album 1")
+            self.assertEqual(db.execute("SELECT name FROM discogs_artists WHERE discogs_artist_id=31").fetchone()[0], "Artist 1")
+            self.assertEqual(db.execute("SELECT catalog_number FROM discogs_release_labels WHERE release_id=101").fetchone()[0], "CAT-1")
+            self.assertEqual(db.execute("SELECT value FROM discogs_release_classifications WHERE release_id=101 AND kind='style'").fetchone()[0], "Alternative Rock")
+            self.assertEqual(db.execute("SELECT version FROM app_schema_versions WHERE app_id='discogs_connector'").fetchone()[0], 2)
+        with sqlite3.connect(self.database_path) as db:
+            db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        self.client.database = None
 
     def test_reuses_fresh_sqlite_cache_unless_forced(self) -> None:
         self.client.collection()
@@ -130,27 +153,58 @@ class CollectionClientTests(unittest.TestCase):
         self.assertEqual(restored["items"][0]["title"], "Album 1")
         self.assertEqual(restarted.session.calls, [])
 
-    def test_release_details_are_saved_and_reused(self) -> None:
+    def test_release_details_are_normalized_and_reused(self) -> None:
         details = self.client.release(101)
         self.assertEqual(details["release"]["tracklist"][0]["title"], "Opening Track")
         self.assertFalse(details["cached"])
+        with sqlite3.connect(self.database_path) as db:
+            self.assertEqual(db.execute("SELECT duration_ms FROM discogs_tracks WHERE release_id=101 AND sequence=1").fetchone()[0], 201000)
+            self.assertEqual(db.execute("SELECT value FROM discogs_release_classifications WHERE release_id=101 AND kind='genre'").fetchone()[0], "Rock")
+            self.assertEqual(db.execute("SELECT role FROM discogs_release_credits WHERE release_id=101").fetchone()[0], "Vocals")
+            self.assertEqual(db.execute("SELECT role FROM discogs_track_credits WHERE track_key='101:t1'").fetchone()[0], "guitar")
+            self.assertIsNotNone(db.execute("SELECT payload_json FROM discogs_release_payloads WHERE release_id=101").fetchone())
+        with sqlite3.connect(self.database_path) as db:
+            db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         restarted = self.module.CollectionClient()
         cached = restarted.release(101)
         self.assertTrue(cached["cached"])
         self.assertEqual(restarted.session.calls, [])
 
-    def test_migrates_existing_database_to_shared_location(self) -> None:
-        previous_path = Path(self.temp.name) / "previous.sqlite3"
-        previous = self.module.CollectionDatabase(previous_path)
-        previous.replace_collection("IPAIRIS", [{
-            "instance_id": 501, "release_id": 101, "title": "Kept Album", "artist": "Kept Artist",
-            "formats": ["Vinyl"], "labels": [], "catalog_numbers": [],
-        }], 1)
-        migrated_path = Path(self.temp.name) / "migrated.sqlite3"
-        migrated = self.module.CollectionDatabase(migrated_path, previous_path)
-        items, sync = migrated.collection_snapshot("IPAIRIS")
-        self.assertEqual(items[0]["title"], "Kept Album")
-        self.assertIsNotNone(sync)
+    def test_migrates_legacy_file_and_preserves_other_shared_tables(self) -> None:
+        target_path = Path(self.temp.name) / "fresh_shared.sqlite3"
+        with sqlite3.connect(target_path) as db:
+            db.execute("CREATE TABLE unrelated_app_data (id INTEGER PRIMARY KEY, value TEXT)")
+            db.execute("INSERT INTO unrelated_app_data(value) VALUES ('keep')")
+            db.execute("PRAGMA user_version=77")
+        with sqlite3.connect(self.legacy_path) as db:
+            db.executescript("""
+                CREATE TABLE collection_sync (username TEXT PRIMARY KEY, synced_at REAL, total INTEGER);
+                CREATE TABLE collection_entries (
+                    instance_id INTEGER PRIMARY KEY, release_id INTEGER NOT NULL, title TEXT NOT NULL,
+                    artist TEXT NOT NULL, year INTEGER, formats_json TEXT, labels_json TEXT,
+                    catalog_numbers_json TEXT, thumb TEXT, cover_image TEXT, resource_url TEXT,
+                    uri TEXT, date_added TEXT, folder_id INTEGER
+                );
+                CREATE TABLE release_details (release_id INTEGER PRIMARY KEY, fetched_at REAL, payload_json TEXT);
+                INSERT INTO collection_sync VALUES ('IPAIRIS', 123.0, 1);
+                INSERT INTO collection_entries VALUES (501, 501, 'Kept Album', 'Kept Artist', 1977,
+                    '["Vinyl"]', '["Label"]', '["OLD-1"]', '', '', '', '/release/501', '2026-01-01', 0);
+                INSERT INTO release_details VALUES (501, 124.0,
+                    '{"id":501,"title":"Kept Album","artists":[{"name":"Kept Artist"}],"tracklist":[{"position":"A1","title":"Kept Track","duration":"2:00"}]}');
+            """)
+        with sqlite3.connect(self.legacy_path) as db:
+            db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        self.module.CollectionDatabase(target_path, (self.legacy_path,))
+        with sqlite3.connect(target_path) as db:
+            self.assertEqual(db.execute("SELECT value FROM unrelated_app_data").fetchone()[0], "keep")
+            self.assertEqual(db.execute("PRAGMA user_version").fetchone()[0], 77)
+            self.assertEqual(db.execute("SELECT title FROM discogs_releases WHERE release_id=501").fetchone()[0], "Kept Album")
+            self.assertEqual(db.execute("SELECT title FROM discogs_tracks WHERE release_id=501").fetchone()[0], "Kept Track")
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM discogs_collection_entries").fetchone()[0], 1)
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM discogs_release_payloads").fetchone()[0], 1)
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='collection_entries'").fetchone()[0], 0)
+        with sqlite3.connect(self.legacy_path) as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM collection_entries").fetchone()[0], 1)
 
     def test_requires_token(self) -> None:
         self.client.token = ""
