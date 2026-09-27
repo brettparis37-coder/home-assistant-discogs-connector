@@ -4,14 +4,15 @@ A standalone Home Assistant app that provides an ingress collection browser for 
 
 ## Data and storage
 
-- Collection metadata is stored in SQLite at `/data/discogs.sqlite3`, inside the app's persistent data volume.
+- Collection metadata is stored in SQLite at `/share/discogs_connector/discogs.sqlite3`, in Home Assistant's shared app folder. This location is readable by SQLite Web, which can open it by setting its **Database** option to this path.
+- The app migrates an existing `/data/discogs.sqlite3` database to the shared location on first startup after upgrading.
 - Collection refreshes replace the local collection snapshot so additions and removals are reflected. The default refresh/cache interval is four hours; use **Refresh collection** to fetch immediately.
 - Opening a release fetches its full Discogs release details, including the available tracklist, and saves that response in SQLite. The app reuses release details for the configured cache interval, then refreshes them when opened again.
 - Album artwork is referenced by Discogs-hosted image URLs and is not copied to local storage.
 - Credentials remain in Home Assistant app options and are not stored in the database or source repository.
 - This version does not yet create listening-history or play-count records. The database is structured so a separate play-history table can be introduced with the future recognition integration.
 
-The collection and opened release metadata are retained until a later refresh replaces or updates them, or the local database is removed. The cache interval controls when the app requests newer Discogs data; it does not automatically delete all retained records at expiry.
+The collection and opened release metadata are retained until a later refresh replaces or updates them, or the local database is removed. The cache interval controls when the app requests newer Discogs data; it does not automatically delete all retained records at expiry. The shared folder can be accessed by apps that mount `/share` and may be exposed through a configured network file-sharing app, so do not store credentials or unrelated sensitive files there.
 
 ## Features
 
