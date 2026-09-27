@@ -1,4 +1,4 @@
-"""Unit tests for pagination, normalized collection rows, and memory caching."""
+"""Unit tests for pagination, SQLite storage, and release detail caching."""
 
 from __future__ import annotations
 
@@ -27,8 +27,21 @@ class FakeSession:
         self.headers: dict[str, str] = {}
         self.calls: list[dict] = []
 
-    def get(self, url: str, *, params: dict, timeout: int) -> FakeResponse:
+    def get(self, url: str, *, params: dict | None = None, timeout: int) -> FakeResponse:
         self.calls.append({"url": url, "params": params, "timeout": timeout})
+        if "/releases/" in url:
+            release_id = int(url.rsplit("/", 1)[1])
+            return FakeResponse({
+                "id": release_id,
+                "title": "Album detail",
+                "artists": [{"name": "Artist Detail"}],
+                "tracklist": [
+                    {"position": "A1", "title": "Opening Track", "duration": "3:21"},
+                    {"position": "A2", "title": "Second Track", "duration": "4:02"},
+                ],
+                "genres": ["Rock"],
+            })
+        assert params is not None
         page = params["page"]
         row = {
             "instance_id": page,
@@ -80,10 +93,14 @@ class CollectionClientTests(unittest.TestCase):
         self.module = load_module()
         self.client_patch = patch.object(self.module, "OPTIONS_PATH", self.options_path)
         self.client_patch.start()
+        self.database_path = Path(self.temp.name) / "discogs.sqlite3"
+        self.database_patch = patch.object(self.module, "DATABASE_PATH", self.database_path)
+        self.database_patch.start()
         self.client = self.module.CollectionClient()
 
     def tearDown(self) -> None:
         self.client_patch.stop()
+        self.database_patch.stop()
         self.temp.cleanup()
 
     def test_fetches_all_pages_and_normalizes_fields(self) -> None:
@@ -94,13 +111,28 @@ class CollectionClientTests(unittest.TestCase):
         self.assertEqual(result["items"][0]["catalog_numbers"], ["CAT-1"])
         self.assertEqual(result["items"][1]["release_id"], 102)
 
-    def test_reuses_fresh_memory_cache_unless_forced(self) -> None:
+    def test_reuses_fresh_sqlite_cache_unless_forced(self) -> None:
         self.client.collection()
         cached = self.client.collection()
         self.assertEqual(len(self.client.session.calls), 2)
         self.assertEqual(len(cached["items"]), 2)
         self.client.collection(force=True)
         self.assertEqual(len(self.client.session.calls), 4)
+
+    def test_collection_cache_survives_client_restart(self) -> None:
+        self.client.collection()
+        restarted = self.module.CollectionClient()
+        restored = restarted.collection()
+        self.assertEqual(restored["items"][0]["title"], "Album 1")
+        self.assertEqual(restarted.session.calls, [])
+
+    def test_release_details_are_saved_and_reused(self) -> None:
+        details = self.client.release(101)
+        self.assertEqual(details["release"]["tracklist"][0]["title"], "Opening Track")
+        self.assertFalse(details["cached"])
+        cached = self.client.release(101)
+        self.assertTrue(cached["cached"])
+        self.assertEqual(len(self.client.session.calls), 1)
 
     def test_requires_token(self) -> None:
         self.client.token = ""
@@ -110,3 +142,4 @@ class CollectionClientTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
