@@ -1,5 +1,5 @@
 name: Discogs Connector
-version: "0.1.0"
+version: "0.2.0"
 slug: discogs_connector
 description: Search your Discogs collection from a private Home Assistant panel.
 startup: application
@@ -21,3 +21,4 @@ schema:
   discogs_username: str
   discogs_token: password
   cache_ttl_minutes: int(15,300)
+
