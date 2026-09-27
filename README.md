@@ -1,8 +1,10 @@
 # Home Assistant Discogs Connector
 
-Standalone Home Assistant app repository for browsing the Discogs collection owned by `IPAIRIS`.
+Standalone Home Assistant app for browsing the Discogs collection owned by `IPAIRIS` (or another configured username).
 
-The app source is in [`discogs_connector/`](discogs_connector/). It provides a searchable collection panel inside Home Assistant, stores collection metadata and opened release details in SQLite under `/share/discogs_connector/` so SQLite Web can inspect it, and loads Discogs-hosted artwork by URL. Setup and data-retention notes are in [`discogs_connector/DOCS.md`](discogs_connector/DOCS.md).
+The app is in [`discogs_connector/`](discogs_connector/). It provides a searchable collection panel, release detail pages with tracklists and credits, and a normalized local SQLite schema. Collection and opened release data are stored in the shared custom-app database at `/share/home_apps.sqlite3`; setup, schema, migration, and refresh behavior are documented in [`discogs_connector/DOCS.md`](discogs_connector/DOCS.md).
 
-The Discogs token is entered in the Home Assistant app Configuration after installation. Never commit it to this repository.
+Tables owned by this app use the `discogs_` prefix. The shared file is intended for separate custom apps to add their own namespaced tables and independently versioned migrations. It is separate from Home Assistant's recorder database. SQLite Web can inspect it by setting its Database option to `/share/home_apps.sqlite3`.
+
+Enter the Discogs personal access token in Home Assistant app Configuration after installation. Never commit tokens to source control.
 
