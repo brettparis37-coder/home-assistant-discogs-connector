@@ -24,6 +24,25 @@ class FakeResponse:
         return self.payload
 
 
+class FakeHTTPError(Exception):
+    def __init__(self, response) -> None:
+        self.response = response
+        self.request = None
+        super().__init__(f"{response.status_code} Client Error: Not Found for url: {response.url}")
+
+
+class NotFoundResponse(FakeResponse):
+    status_code = 404
+    text = '{"message":"Release not found"}'
+
+    def __init__(self, payload: dict, url: str) -> None:
+        super().__init__(payload)
+        self.url = url
+
+    def raise_for_status(self) -> None:
+        raise FakeHTTPError(self)
+
+
 class FakeSession:
     def __init__(self) -> None:
         self.headers: dict[str, str] = {}
@@ -90,7 +109,7 @@ class FakeSession:
 def load_module():
     fake_requests = types.ModuleType("requests")
     fake_requests.Session = FakeSession
-    fake_requests.HTTPError = type("HTTPError", (Exception,), {})
+    fake_requests.HTTPError = FakeHTTPError
     fake_requests.RequestException = type("RequestException", (Exception,), {})
     previous = sys.modules.get("requests")
     sys.modules["requests"] = fake_requests
@@ -153,7 +172,7 @@ class CollectionClientTests(unittest.TestCase):
             self.assertEqual(db.execute("SELECT name FROM discogs_artists WHERE discogs_artist_id=31").fetchone()[0], "Artist 1")
             self.assertEqual(db.execute("SELECT catalog_number FROM discogs_release_labels WHERE release_id=101").fetchone()[0], "CAT-1")
             self.assertEqual(db.execute("SELECT value FROM discogs_release_classifications WHERE release_id=101 AND kind='style'").fetchone()[0], "Alternative Rock")
-            self.assertEqual(db.execute("SELECT version FROM app_schema_versions WHERE app_id='discogs_connector'").fetchone()[0], 3)
+            self.assertEqual(db.execute("SELECT version FROM app_schema_versions WHERE app_id='discogs_connector'").fetchone()[0], 4)
         with sqlite3.connect(self.database_path) as db:
             db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         self.client.database = None
@@ -209,6 +228,39 @@ class CollectionClientTests(unittest.TestCase):
         releases, masters = self.client.database.collection_enrichment_queue("IPAIRIS")
         self.assertEqual(releases, [101, 102])
         self.assertEqual(masters, [901, 902])
+
+    def test_enrichment_queue_skips_zero_master_id(self) -> None:
+        self.client.collection()
+        with self.client.database.connect() as db:
+            db.execute("UPDATE discogs_releases SET master_id=0 WHERE release_id=101")
+        _releases, masters = self.client.database.collection_enrichment_queue("IPAIRIS")
+        self.assertEqual(masters, [902])
+
+    def test_master_404_is_recorded_and_other_masters_continue(self) -> None:
+        self.client.collection()
+
+        class SessionWithMissingMaster(FakeSession):
+            def get(self, url: str, *, params: dict | None = None, timeout: int):
+                if url.endswith("/masters/901"):
+                    return NotFoundResponse({}, url)
+                return super().get(url, params=params, timeout=timeout)
+
+        with (
+            patch.object(self.module.requests, "Session", SessionWithMissingMaster),
+            patch.object(self.module.time, "sleep", return_value=None),
+        ):
+            self.client._enrich_collection_metadata()
+
+        self.assertIsNone(self.client.database.master_details(901))
+        self.assertIsNotNone(self.client.database.master_details(902))
+        _releases, masters = self.client.database.collection_enrichment_queue("IPAIRIS")
+        self.assertEqual(masters, [])
+        with self.client.database.connect() as db:
+            failure = db.execute(
+                "SELECT status_code, message FROM discogs_metadata_failures WHERE entity_type='master' AND entity_id=901"
+            ).fetchone()
+        self.assertEqual(failure[0], 404)
+        self.assertIn("404", failure[1])
 
     def test_background_enrichment_populates_tracks_and_master_data(self) -> None:
         self.client.enrichment_enabled = True
@@ -280,3 +332,4 @@ class CollectionClientTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
