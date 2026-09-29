@@ -1,3 +1,9 @@
+# 0.7.5
+
+- Select a brighter, more saturated artwork color while down-weighting dark shadows, and log the sampled color for each pick.
+- Apply the color directly to the full card background and update rendering when the sensor color changes.
+- Replace the cover flip with a perspective reel: adjacent covers peek into the frame and each unique cover eases upward into place as the shuffle slows.
+
 # 0.7.4
 
 - Sample a dark dominant color from the selected Discogs cover in the app and publish it with the pick, avoiding browser cross-origin restrictions.
