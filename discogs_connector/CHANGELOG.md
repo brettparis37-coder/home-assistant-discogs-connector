@@ -1,3 +1,7 @@
+# 0.7.1
+
+- Enable the Home Assistant Core API proxy required for the random-pick event listener and sensor updates.
+
 # 0.7.0
 
 - Add a cached-collection random picker and publish selected release/master metadata through `sensor.discogs_random_pick`.

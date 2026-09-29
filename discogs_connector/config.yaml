@@ -1,7 +1,8 @@
 name: Discogs Connector
-version: "0.7.0"
+version: "0.7.1"
 slug: discogs_connector
 description: Search your Discogs collection from a private Home Assistant panel.
+homeassistant_api: true
 startup: application
 boot: auto
 init: false

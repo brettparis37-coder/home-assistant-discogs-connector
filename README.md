@@ -4,7 +4,7 @@ Standalone Home Assistant app for browsing the Discogs collection owned by `IPAI
 
 The app is in [`discogs_connector/`](discogs_connector/). It provides a profile and collection overview, a searchable table with fixed-size cover art, release detail pages with tracklists, and a random record picker. The picker uses only the locally cached collection and publishes its choice as `sensor.discogs_random_pick`. It uses a normalized local SQLite schema. Collection and opened release data are stored in the shared custom-app database at `/share/home_apps.sqlite3`; setup, schema, migration, and refresh behavior are documented in [`discogs_connector/DOCS.md`](discogs_connector/DOCS.md).
 
-This repository also contains a HACS Dashboard card in [`dist/home-assistant-discogs-connector.js`](dist/home-assistant-discogs-connector.js). Install this same GitHub repository in both Home Assistant Apps and HACS (as a **Dashboard** custom repository) to get the app and card updates from one source.
+This repository also contains a HACS Dashboard card in [`dist/home-assistant-discogs-connector.js`](dist/home-assistant-discogs-connector.js). Install this same GitHub repository in both Home Assistant Apps and HACS (as a **Dashboard** custom repository) to get the app and card updates from one source. The app uses Home Assistant's internal Core API proxy to receive picker events and publish its selection sensor.
 
 Tables owned by this app use the `discogs_` prefix. The shared file is intended for separate custom apps to add their own namespaced tables and independently versioned migrations. It is separate from Home Assistant's recorder database. SQLite Web can inspect it by setting its Database option to `/share/home_apps.sqlite3`.
 

@@ -1061,7 +1061,11 @@ def start_random_pick_event_listener(client: CollectionClient) -> threading.Thre
                 }))
                 auth_result = json.loads(connection.recv())
                 if auth_result.get("type") != "auth_ok":
-                    raise RuntimeError(f"Home Assistant websocket authentication failed: {auth_result.get('message', auth_result.get('type'))}")
+                    raise RuntimeError(
+                        "Home Assistant rejected the app's Core API proxy token "
+                        f"({auth_result.get('message', auth_result.get('type'))}); "
+                        "verify homeassistant_api: true in the app manifest, then rebuild/restart the app"
+                    )
                 connection.send(json.dumps({
                     "id": 1, "type": "subscribe_events", "event_type": RANDOM_PICK_EVENT,
                 }))
