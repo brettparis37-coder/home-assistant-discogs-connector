@@ -605,9 +605,9 @@ class CollectionDatabase:
         selected["discogs_url"] = f"https://www.discogs.com/release/{release_id}"
         return selected, len(rows)
 
-    def collection_artwork_sample(self, username: str, limit: int = 24) -> list[str]:
+    def collection_artwork_sample(self, username: str, limit: int = 50) -> list[str]:
         """Return a random sample of cached collection cover URLs for the card animation."""
-        limit = max(1, min(48, int(limit)))
+        limit = max(1, min(50, int(limit)))
         with self.connect() as connection:
             sync = connection.execute(
                 "SELECT 1 FROM discogs_collection_sync WHERE username = ?", (username,)
@@ -1304,3 +1304,4 @@ if __name__ == "__main__":
     start_scheduled_collection_refresh(client)
     start_random_pick_event_listener(client)
     ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
+
