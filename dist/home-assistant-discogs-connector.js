@@ -26,6 +26,30 @@ class DiscogsRandomRecordCard extends HTMLElement {
     this._shuffleDurationMs = 6200;
     this._frameIntervalMs = 160;
     this._lastRenderKey = "";
+    this._states = null;
+    this._unsubscribeStates = null;
+  }
+
+  connectedCallback() {
+    const event = new CustomEvent("context-request", {
+      bubbles: true,
+      composed: true,
+      cancelable: true,
+    });
+    event.context = "states";
+    event.subscribe = true;
+    event.callback = (states, unsubscribe) => {
+      this._states = states;
+      if (typeof unsubscribe === "function") this._unsubscribeStates = unsubscribe;
+      this._handleEntityUpdate(states?.[this._config.entity]);
+    };
+    this.dispatchEvent(event);
+    this._render();
+  }
+
+  disconnectedCallback() {
+    this._unsubscribeStates?.();
+    this._unsubscribeStates = null;
   }
 
   setConfig(config) {
@@ -36,7 +60,14 @@ class DiscogsRandomRecordCard extends HTMLElement {
 
   set hass(hass) {
     this._hass = hass;
-    const entity = hass?.states?.[this._config.entity];
+    this._handleEntityUpdate(hass?.states?.[this._config.entity]);
+  }
+
+  _currentEntity() {
+    return this._states?.[this._config.entity] || this._hass?.states?.[this._config.entity];
+  }
+
+  _handleEntityUpdate(entity) {
     const attributes = entity?.attributes || {};
     const incomingPickId = attributes.pick_id || "";
     if (attributes.status === "selected" && incomingPickId) {
@@ -149,7 +180,7 @@ class DiscogsRandomRecordCard extends HTMLElement {
     );
     this._advanceShuffleFrame();
     const waitForFinalCover = () => {
-      const current = this._hass?.states?.[this._config.entity]?.attributes || {};
+      const current = this._currentEntity()?.attributes || {};
       if (current.status === "selected" && current.pick_id === this._animatedPickId) {
         this._lockFinalCover(current);
       } else if (this._spinning) {
@@ -159,7 +190,7 @@ class DiscogsRandomRecordCard extends HTMLElement {
     this._lockTimer = window.setTimeout(waitForFinalCover, this._shuffleDurationMs - 700);
     this._finishTimer = window.setTimeout(() => {
       this._spinning = false;
-      const current = this._hass?.states?.[this._config.entity];
+      const current = this._currentEntity();
       const hasResult = current?.attributes?.status === "selected" &&
         current?.attributes?.pick_id === this._animatedPickId;
       this._animationFinished = !hasResult;
@@ -207,7 +238,7 @@ class DiscogsRandomRecordCard extends HTMLElement {
 
   async _pick() {
     if (this._spinning || !this._hass) return;
-    const current = this._hass.states?.[this._config.entity];
+    const current = this._currentEntity();
     this._previousPickId = current?.attributes?.pick_id || "";
     this._startShuffle();
     this._render(true);
@@ -293,7 +324,7 @@ class DiscogsRandomRecordCard extends HTMLElement {
 
   _render(force = false, messageOverride = "") {
     if (!this.shadowRoot || !this._config) return;
-    const entity = this._hass?.states?.[this._config.entity];
+    const entity = this._currentEntity();
     const a = entity?.attributes || {};
     const renderKey = [entity?.state, a.status, a.pick_id, a.artwork_url, a.dominant_color,
       a.title, a.artist, a.release_year, a.master_year, this._spinning, messageOverride].join("|");
