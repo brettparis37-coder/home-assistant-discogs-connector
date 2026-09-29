@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import json
+import colorsys
+from io import BytesIO
 import os
 import secrets
 import sqlite3
@@ -20,7 +22,6 @@ from urllib.parse import urlparse
 
 import requests
 from PIL import Image
-from io import BytesIO
 
 OPTIONS_PATH = Path("/data/options.json")
 DATABASE_PATH = Path("/share/home_apps.sqlite3")
@@ -774,7 +775,7 @@ class CollectionClient:
         self.database = CollectionDatabase(DATABASE_PATH, LEGACY_DATABASE_PATHS)
         self.session = requests.Session()
         self.session.headers.update({
-            "User-Agent": "HomeAssistantDiscogsConnector/0.7.4 (personal collection browser)",
+            "User-Agent": "HomeAssistantDiscogsConnector/0.7.5 (personal collection browser)",
             "Accept": "application/vnd.discogs.v2.plain+json",
         })
         if self.token:
@@ -802,7 +803,7 @@ class CollectionClient:
 
     @staticmethod
     def _dominant_artwork_color(artwork_url: str) -> str:
-        """Sample a dark, readable dominant cover color from a Discogs-hosted image."""
+        """Choose a vivid, readable cover color without letting dark shadows dominate."""
         parsed = urlparse(artwork_url)
         host = (parsed.hostname or "").lower()
         if parsed.scheme != "https" or not (host == "discogs.com" or host.endswith(".discogs.com")):
@@ -823,14 +824,26 @@ class CollectionClient:
             for count, color in (palette.getcolors(48 * 48) or []):
                 r, g, b = color
                 high, low = max(r, g, b), min(r, g, b)
-                if high < 38 or low > 238 or high - low < 18:
+                hue, saturation, value = colorsys.rgb_to_hsv(r / 255, g / 255, b / 255)
+                if value < 0.18 or value > 0.98 or saturation < 0.16:
                     continue
-                candidates.append((count, r, g, b))
+                # Favor saturated colors with enough brightness to read as the cover's hue.
+                score = count * ((0.25 + saturation) ** 1.5) * ((0.2 + value) ** 2)
+                candidates.append((score, hue, saturation, value))
             if not candidates:
-                return ""
-            _, r, g, b = max(candidates)
-            dark = [max(24, min(150, round(channel * 0.58))) for channel in (r, g, b)]
-            return "#%02x%02x%02x" % tuple(dark)
+                colors = palette.getcolors(48 * 48) or []
+                if not colors:
+                    return ""
+                _count, (r, g, b) = max(colors)
+                hue, saturation, value = colorsys.rgb_to_hsv(r / 255, g / 255, b / 255)
+                if saturation < 0.16:
+                    return "#48484a"
+            else:
+                _score, hue, saturation, value = max(candidates)
+            # Preserve the chosen hue, strengthen muted artwork, and normalize brightness.
+            rgb = colorsys.hsv_to_rgb(hue, max(0.48, min(0.88, saturation)), max(0.42, min(0.58, value)))
+            color = tuple(round(channel * 255) for channel in rgb)
+            return "#%02x%02x%02x" % color
         except Exception as exc:
             log("Album cover color could not be sampled; the dashboard theme color will be used", error=exc)
             return ""
@@ -884,6 +897,10 @@ class CollectionClient:
                 "collection_size": collection_size,
                 "shuffle_artworks": shuffle_artworks,
             }
+            log(
+                f"Random pick cover palette: release_id={attributes['release_id']} "
+                f"dominant_color={attributes['dominant_color'] or 'unavailable'}"
+            )
             self._publish_random_pick(attributes["title"], attributes)
             log(
                 f"Random collection pick selected: release_id={attributes['release_id']} "
