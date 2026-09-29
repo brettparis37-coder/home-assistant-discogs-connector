@@ -1,3 +1,7 @@
+# 0.7.2
+
+- Animate random picks by shuffling through a sample of locally cached collection artwork, then reveal the chosen release details.
+
 # 0.7.1
 
 - Enable the Home Assistant Core API proxy required for the random-pick event listener and sensor updates.

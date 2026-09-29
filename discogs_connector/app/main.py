@@ -605,6 +605,29 @@ class CollectionDatabase:
         selected["discogs_url"] = f"https://www.discogs.com/release/{release_id}"
         return selected, len(rows)
 
+    def collection_artwork_sample(self, username: str, limit: int = 24) -> list[str]:
+        """Return a random sample of cached collection cover URLs for the card animation."""
+        limit = max(1, min(48, int(limit)))
+        with self.connect() as connection:
+            sync = connection.execute(
+                "SELECT 1 FROM discogs_collection_sync WHERE username = ?", (username,)
+            ).fetchone()
+            if sync is None:
+                return []
+            artwork_urls = [row[0] for row in connection.execute(
+                """SELECT DISTINCT COALESCE(NULLIF(r.cover_image, ''), NULLIF(r.thumb, ''),
+                                             NULLIF(m.artwork_url, '')) AS artwork_url
+                   FROM discogs_collection_entries e
+                   JOIN discogs_releases r USING (release_id)
+                   LEFT JOIN discogs_masters m ON m.master_id = r.master_id
+                   WHERE COALESCE(NULLIF(r.cover_image, ''), NULLIF(r.thumb, ''),
+                                  NULLIF(m.artwork_url, '')) IS NOT NULL
+                   ORDER BY artwork_url COLLATE NOCASE"""
+            )]
+        if len(artwork_urls) > limit:
+            artwork_urls = secrets.SystemRandom().sample(artwork_urls, limit)
+        return artwork_urls
+
     def replace_collection(self, username: str, items: list[dict[str, Any]], total: int) -> float:
         now = time.time()
         with self.connect() as connection:
@@ -790,6 +813,7 @@ class CollectionClient:
             self._publish_random_pick("Picking a record", base)
             try:
                 record, collection_size = self.database.random_collection_release(self.username)
+                shuffle_artworks = self.database.collection_artwork_sample(self.username)
             except Exception as exc:
                 failed = {**base, "status": "error", "error": f"Local collection lookup failed: {exc}"[:500]}
                 self._publish_random_pick("Pick failed", failed)
@@ -818,6 +842,7 @@ class CollectionClient:
                 "formats": record.get("formats") or [],
                 "date_added": record.get("date_added") or "",
                 "collection_size": collection_size,
+                "shuffle_artworks": shuffle_artworks,
             }
             self._publish_random_pick(attributes["title"], attributes)
             log(

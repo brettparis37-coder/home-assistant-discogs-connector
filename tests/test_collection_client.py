@@ -303,6 +303,16 @@ class CollectionClientTests(unittest.TestCase):
         self.assertEqual(count, 0)
         self.assertEqual(self.client.session.calls, [])
 
+    def test_collection_artwork_sample_is_bounded_and_uses_cached_rows(self) -> None:
+        self.client.collection()
+        with self.client.database.connect() as db:
+            db.execute("UPDATE discogs_releases SET cover_image='https://img.discogs.com/cover-101.jpg' WHERE release_id=101")
+            db.execute("UPDATE discogs_releases SET cover_image='https://img.discogs.com/cover-102.jpg' WHERE release_id=102")
+        sample = self.client.database.collection_artwork_sample("IPAIRIS", limit=1)
+        self.assertEqual(len(sample), 1)
+        self.assertTrue(sample[0].startswith("https://img.discogs.com/cover-"))
+        self.assertEqual(len(self.client.session.calls), 2)
+
     def test_random_pick_publishes_sensor_attributes(self) -> None:
         self.client.collection()
         published = []
@@ -318,6 +328,7 @@ class CollectionClientTests(unittest.TestCase):
         self.assertEqual(len(published), 2)
         self.assertEqual(published[-1][1]["pick_id"], result["pick_id"])
         self.assertEqual(published[-1][1]["status"], "selected")
+        self.assertEqual(result["shuffle_artworks"], ["https://img.discogs.com/cover.jpg"])
 
     def test_marketplace_stats_are_returned_without_persisting_them(self) -> None:
         result = self.client.marketplace_stats(101)

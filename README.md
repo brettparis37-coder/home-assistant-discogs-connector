@@ -35,6 +35,6 @@ To use Hue Tap Dial Button 4, add this automation to `automations.yaml` (or recr
         source: hue_button_4
 ```
 
-The card reveals the selected record, cover, collected-edition year, original master year, format, and Discogs release link. The release image is preferred; master artwork is used if the collection entry has no release image. Selection allows repeats across separate spins.
+The card fast-flips through up to 24 cover images from the cached collection, slows the flips near the end, then reveals the selected record, cover, collected-edition year, original master year, format, and Discogs release link. It hides the album details during the animation. These cover URLs come from the local database; the picker does not make extra Discogs API calls. The release image is preferred; master artwork is used if the collection entry has no release image. Selection allows repeats across separate spins.
 
 An optional Tidbyt renderer and Home Assistant automation example are in [`examples/tidbyt/`](examples/tidbyt/). They show the picked record on the living-room Tidbyt for 15 seconds and then restore the turntable now-playing display when a recognized record is still playing. These files are examples and are not installed automatically by HACS or the app.
