@@ -39,7 +39,7 @@ On first startup of version 0.3.0, the app preserves and imports existing Discog
 ## Install
 
 1. Add this repository in **Settings → Apps → App store → Repositories**.
-2. Install or update **Discogs Connector** to version 0.7.2.
+2. Install or update **Discogs Connector** to version 0.7.3.
 3. In Configuration, confirm the username and enter your Discogs personal access token if needed; save and restart.
 4. Open the **Discogs Collection** panel and load or refresh your collection.
 5. In SQLite Web, set **Database** to `/share/home_apps.sqlite3`, save, and restart SQLite Web. You should then see the `discogs_` tables alongside other custom-app tables.
@@ -48,7 +48,7 @@ On first startup of version 0.3.0, the app preserves and imports existing Discog
 
 The app selects uniformly from distinct releases in the locally cached `discogs_collection_entries` table. A pick does not call Discogs and does not change the collection tables. It publishes the result and a unique `pick_id` to `sensor.discogs_random_pick`, including release/master year and artwork URLs, format, Discogs URL, pick timestamp, and collection size. On app start, a Supervisor-authenticated WebSocket subscribes only to the `discogs_random_pick_requested` event. The HACS card and the optional Hue automation raise that event with a source label.
 
-While a pick is resolving, the app also sends a sample of up to 24 cover URLs already stored in SQLite. The card fast-flips through those covers, slows the sequence, and reveals the selected album details after about six seconds. The animation is only a presentation effect; the chosen release is selected from SQLite and does not depend on the animated sequence.
+While a pick is resolving, the app also sends a sample of up to 50 cover URLs already stored in SQLite. The card shuffles for about six seconds, slows its flips, and holds the selected cover shortly before showing the release details. The card and cover frame retain the same dimensions throughout. The shuffle uses the dashboard theme background; on the selected result the card samples a dominant cover color when the image host permits canvas access. The animation is only a presentation effect; the chosen release is selected from SQLite and does not depend on the animated sequence.
 
 Install the repository in HACS as a **Dashboard** custom repository, install **Discogs Random Record**, then search for that name in the dashboard card picker. The card element type is `custom:discogs-random-record-card`. HACS installs the resource and handles upgrades. If it does not appear immediately, reload the browser after HACS finishes downloading it.
 
@@ -82,3 +82,4 @@ The app requires outbound HTTPS access to `api.discogs.com` and Discogs-hosted i
 ## Attribution
 
 This application uses Discogs' API but is not affiliated with, sponsored, or endorsed by Discogs. Discogs is a trademark of Zink Media, LLC. Collection results and detail pages attribute and link to Discogs.
+
