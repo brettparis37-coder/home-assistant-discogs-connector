@@ -8,6 +8,8 @@ class DiscogsRandomRecordCard extends HTMLElement {
     this._spinning = false;
     this._pickStartedAt = 0;
     this._previousPickId = "";
+    this._lastPickId = "";
+    this._seenEntityState = false;
     this._timeout = null;
     this._lastRenderKey = "";
   }
@@ -22,8 +24,19 @@ class DiscogsRandomRecordCard extends HTMLElement {
     this._hass = hass;
     const entity = hass?.states?.[this._config.entity];
     const attributes = entity?.attributes || {};
+    const incomingPickId = attributes.pick_id || "";
+    if (!this._seenEntityState) {
+      this._lastPickId = incomingPickId;
+      this._seenEntityState = true;
+    } else if (attributes.status === "picking" && incomingPickId && incomingPickId !== this._lastPickId) {
+      this._previousPickId = this._lastPickId;
+      this._lastPickId = incomingPickId;
+      this._spinning = true;
+      this._pickStartedAt = Date.now();
+    }
     if (this._spinning && attributes.status === "selected" &&
         attributes.pick_id && attributes.pick_id !== this._previousPickId) {
+      this._lastPickId = attributes.pick_id;
       const wait = Math.max(0, 1700 - (Date.now() - this._pickStartedAt));
       window.clearTimeout(this._settleTimer);
       this._settleTimer = window.setTimeout(() => {
@@ -33,6 +46,7 @@ class DiscogsRandomRecordCard extends HTMLElement {
       }, wait);
     } else if (this._spinning && ["empty", "error"].includes(attributes.status) &&
                attributes.pick_id !== this._previousPickId) {
+      this._lastPickId = attributes.pick_id || this._lastPickId;
       this._spinning = false;
       this._clearRequestTimeout();
     }
