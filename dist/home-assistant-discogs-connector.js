@@ -161,5 +161,5 @@ if (!window.customCards.some((card) => card.type === CARD_TAG)) {
   });
 }
 
-console.info("%c DISCogs Random Record %c Discogs Connector", "background:#102126;color:#55c6bc;font-weight:700", "background:#55c6bc;color:#102126;font-weight:700");
+console.info("%c DISCOGS RANDOM RECORD %c Discogs Connector", "background:#102126;color:#55c6bc;font-weight:700", "background:#55c6bc;color:#102126;font-weight:700");
 
