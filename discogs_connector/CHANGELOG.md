@@ -1,3 +1,9 @@
+# 0.7.3
+
+- Expand the shuffle artwork sample to 50 cached covers.
+- Hold the selected cover before revealing details, keep the card geometry stable, and tint the result with a dominant color sampled from its cover when browser access permits.
+- Slow the opening shuffle flips while retaining the existing total animation duration.
+
 # 0.7.2
 
 - Animate random picks by shuffling through a sample of locally cached collection artwork, then reveal the chosen release details.
@@ -28,3 +34,4 @@
 - Add the normalized `discogs_masters` table for Discogs master year and primary artwork URLs.
 - Incrementally enrich collection releases with normalized tracklists and master data in a background worker, paced to stay under normal Discogs request rates.
 - Keep collection rows and stable Discogs IDs intact during the schema migration.
+
