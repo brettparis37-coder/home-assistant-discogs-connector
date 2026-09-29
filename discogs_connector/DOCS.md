@@ -39,14 +39,44 @@ On first startup of version 0.3.0, the app preserves and imports existing Discog
 ## Install
 
 1. Add this repository in **Settings → Apps → App store → Repositories**.
-2. Install or update **Discogs Connector** to version 0.6.1.
+2. Install or update **Discogs Connector** to version 0.7.0.
 3. In Configuration, confirm the username and enter your Discogs personal access token if needed; save and restart.
 4. Open the **Discogs Collection** panel and load or refresh your collection.
 5. In SQLite Web, set **Database** to `/share/home_apps.sqlite3`, save, and restart SQLite Web. You should then see the `discogs_` tables alongside other custom-app tables.
+
+## Random record picker
+
+The app selects uniformly from distinct releases in the locally cached `discogs_collection_entries` table. A pick does not call Discogs and does not change the collection tables. It publishes the result and a unique `pick_id` to `sensor.discogs_random_pick`, including release/master year and artwork URLs, format, Discogs URL, pick timestamp, and collection size. On app start, a Supervisor-authenticated WebSocket subscribes only to the `discogs_random_pick_requested` event. The HACS card and the optional Hue automation raise that event with a source label.
+
+Install the repository in HACS as a **Dashboard** custom repository, install **Discogs Random Record**, then search for that name in the dashboard card picker. The card element type is `custom:discogs-random-record-card`. HACS installs the resource and handles upgrades. If it does not appear immediately, reload the browser after HACS finishes downloading it.
+
+For Hue Tap Dial Button 4, add this automation to `automations.yaml`:
+
+```yaml
+- id: discogs_random_record_from_hue_dial
+  alias: Hue dial - Pick a random Discogs record
+  mode: single
+  triggers:
+    - trigger: event.received
+      target:
+        entity_id: event.unassigned_hue_tap_dial_switch_1_button_4
+      options:
+        event_type:
+          - short_release
+  actions:
+    - event: discogs_random_pick_requested
+      event_data:
+        source: hue_button_4
+```
+
+The random choice samples unique release IDs, so multiple owned copies of a release do not make it more likely. Separate picks may select the same release; recent-play avoidance can be added later using persistent play history.
+
+### Optional Tidbyt preview
+
+The repository includes [`../examples/tidbyt/discogspick.star`](../examples/tidbyt/discogspick.star) and [`../examples/tidbyt/random-pick-automation.yaml`](../examples/tidbyt/random-pick-automation.yaml). Copy `discogspick.star` into the TidbytAssistant app's configured Tidbyt content directory, then add the automation item to `automations.yaml`. It briefly overrides the living-room display for 15 seconds, then restarts the turntable now-playing script if playback remains recognized. The automation skips its display while the existing volume override script is active. Validate your TidbytAssistant custom-content path before enabling it.
 
 The app requires outbound HTTPS access to `api.discogs.com` and Discogs-hosted image URLs.
 
 ## Attribution
 
 This application uses Discogs' API but is not affiliated with, sponsored, or endorsed by Discogs. Discogs is a trademark of Zink Media, LLC. Collection results and detail pages attribute and link to Discogs.
-

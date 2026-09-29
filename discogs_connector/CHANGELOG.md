@@ -1,3 +1,9 @@
+# 0.7.0
+
+- Add a cached-collection random picker and publish selected release/master metadata through `sensor.discogs_random_pick`.
+- Add the HACS Dashboard card bundle for animated random selection and album details.
+- Listen for the `discogs_random_pick_requested` Home Assistant event for dashboard and Hue Dial triggers.
+
 # 0.6.1
 
 - Ignore invalid zero master IDs and continue enrichment after individual Discogs 404 responses.
@@ -14,4 +20,3 @@
 - Add the normalized `discogs_masters` table for Discogs master year and primary artwork URLs.
 - Incrementally enrich collection releases with normalized tracklists and master data in a background worker, paced to stay under normal Discogs request rates.
 - Keep collection rows and stable Discogs IDs intact during the schema migration.
-

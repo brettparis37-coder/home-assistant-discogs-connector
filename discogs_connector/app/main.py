@@ -4,10 +4,13 @@
 from __future__ import annotations
 
 import json
+import os
+import secrets
 import sqlite3
 import threading
 import time
 import traceback
+import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -26,6 +29,8 @@ LEGACY_DATABASE_PATHS = (
 API_ROOT = "https://api.discogs.com"
 PORT = 8099
 MAX_PAGES = 100
+RANDOM_PICK_EVENT = "discogs_random_pick_requested"
+RANDOM_PICK_ENTITY = "sensor.discogs_random_pick"
 
 
 def log(message: str, *, error: BaseException | None = None) -> None:
@@ -559,6 +564,47 @@ class CollectionDatabase:
                     "SELECT value FROM discogs_release_classifications WHERE release_id=? AND kind='style' ORDER BY value COLLATE NOCASE", (rid,))]
         return items, {"synced_at": float(sync["synced_at"]), "total": int(sync["total"])}
 
+    def random_collection_release(self, username: str) -> tuple[dict[str, Any] | None, int]:
+        """Choose one owned release uniformly from the local collection cache."""
+        with self.connect() as connection:
+            sync = connection.execute(
+                "SELECT 1 FROM discogs_collection_sync WHERE username = ?", (username,)
+            ).fetchone()
+            if sync is None:
+                return None, 0
+            rows = connection.execute(
+                """SELECT DISTINCT r.release_id, r.title, r.year AS release_year,
+                          r.thumb, r.cover_image AS release_artwork_url, r.uri,
+                          r.resource_url, r.master_id, m.year AS master_year,
+                          m.artwork_url AS master_artwork_url
+                   FROM discogs_collection_entries e
+                   JOIN discogs_releases r USING (release_id)
+                   LEFT JOIN discogs_masters m ON m.master_id = r.master_id
+                   ORDER BY r.release_id"""
+            ).fetchall()
+            if not rows:
+                return None, 0
+            selected = dict(secrets.choice(rows))
+            release_id = int(selected["release_id"])
+            selected["artist"] = ", ".join(row[0] for row in connection.execute(
+                """SELECT a.name FROM discogs_release_artists ra
+                   JOIN discogs_artists a USING (artist_key)
+                   WHERE ra.release_id = ? ORDER BY ra.position""", (release_id,)
+            ))
+            selected["formats"] = [row[0] for row in connection.execute(
+                "SELECT name FROM discogs_release_formats WHERE release_id = ? ORDER BY position", (release_id,)
+            )]
+            selected["date_added"] = connection.execute(
+                "SELECT date_added FROM discogs_collection_entries WHERE release_id = ? ORDER BY date_added DESC LIMIT 1",
+                (release_id,),
+            ).fetchone()[0]
+        selected["artwork_url"] = (
+            selected.get("release_artwork_url") or selected.get("thumb")
+            or selected.get("master_artwork_url") or ""
+        )
+        selected["discogs_url"] = f"https://www.discogs.com/release/{release_id}"
+        return selected, len(rows)
+
     def replace_collection(self, username: str, items: list[dict[str, Any]], total: int) -> float:
         now = time.time()
         with self.connect() as connection:
@@ -702,14 +748,83 @@ class CollectionClient:
         self.database = CollectionDatabase(DATABASE_PATH, LEGACY_DATABASE_PATHS)
         self.session = requests.Session()
         self.session.headers.update({
-            "User-Agent": "HomeAssistantDiscogsConnector/0.6.0 (personal collection browser)",
+            "User-Agent": "HomeAssistantDiscogsConnector/0.7.0 (personal collection browser)",
             "Accept": "application/vnd.discogs.v2.plain+json",
         })
         if self.token:
             self.session.headers["Authorization"] = f"Discogs token={self.token}"
         self._lock = threading.Lock()
+        self._pick_lock = threading.Lock()
         self.enrichment_enabled = bool(options.get("enrich_collection_details", True))
         self._enrichment_thread: threading.Thread | None = None
+
+    def _publish_random_pick(self, state: str, attributes: dict[str, Any]) -> None:
+        supervisor_token = os.environ.get("SUPERVISOR_TOKEN", "").strip()
+        if not supervisor_token:
+            log("Random pick selected, but Home Assistant state was not published: SUPERVISOR_TOKEN is unavailable")
+            return
+        try:
+            response = requests.post(
+                f"http://supervisor/core/api/states/{RANDOM_PICK_ENTITY}",
+                headers={"Authorization": f"Bearer {supervisor_token}", "Content-Type": "application/json"},
+                json={"state": state[:255], "attributes": attributes}, timeout=10,
+            )
+            response.raise_for_status()
+            log(f"Random pick sensor updated: status={attributes.get('status')} pick_id={attributes.get('pick_id')}")
+        except Exception as exc:
+            log("Could not publish random pick to Home Assistant", error=exc)
+
+    def pick_random_record(self, source: str = "dashboard") -> dict[str, Any]:
+        """Select from the cached collection and publish the result as a HA sensor."""
+        with self._pick_lock:
+            pick_id = str(uuid.uuid4())
+            picked_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+            base = {
+                "friendly_name": "Discogs Random Record",
+                "icon": "mdi:album",
+                "status": "picking",
+                "pick_id": pick_id,
+                "picked_at": picked_at,
+                "trigger_source": source[:80],
+            }
+            self._publish_random_pick("Picking a record", base)
+            try:
+                record, collection_size = self.database.random_collection_release(self.username)
+            except Exception as exc:
+                failed = {**base, "status": "error", "error": f"Local collection lookup failed: {exc}"[:500]}
+                self._publish_random_pick("Pick failed", failed)
+                log("Random collection selection failed", error=exc)
+                return failed
+            if record is None:
+                empty = {**base, "status": "empty", "collection_size": 0,
+                         "error": "Load or refresh your Discogs collection before choosing a record."}
+                self._publish_random_pick("Collection not loaded", empty)
+                log(f"Random pick requested from {source}; local collection is empty or not loaded")
+                return empty
+            attributes = {
+                **base,
+                "status": "selected",
+                "title": record.get("title") or "Untitled release",
+                "artist": record.get("artist") or "Unknown artist",
+                "album": record.get("title") or "Untitled release",
+                "release_id": record.get("release_id"),
+                "master_id": record.get("master_id"),
+                "release_year": record.get("release_year"),
+                "master_year": record.get("master_year"),
+                "artwork_url": record.get("artwork_url") or "",
+                "release_artwork_url": record.get("release_artwork_url") or record.get("thumb") or "",
+                "master_artwork_url": record.get("master_artwork_url") or "",
+                "discogs_url": record.get("discogs_url") or "",
+                "formats": record.get("formats") or [],
+                "date_added": record.get("date_added") or "",
+                "collection_size": collection_size,
+            }
+            self._publish_random_pick(attributes["title"], attributes)
+            log(
+                f"Random collection pick selected: release_id={attributes['release_id']} "
+                f"pick_id={pick_id} source={source} collection_size={collection_size}"
+            )
+            return attributes
 
     def status(self) -> dict[str, Any]:
         _items, sync = self.database.collection_snapshot(self.username)
@@ -924,6 +1039,65 @@ def get_client() -> CollectionClient:
     return CLIENT
 
 
+def start_random_pick_event_listener(client: CollectionClient) -> threading.Thread | None:
+    """Subscribe to a narrowly scoped HA event without exposing an app port."""
+    if not os.environ.get("SUPERVISOR_TOKEN", "").strip():
+        log("Random-pick Home Assistant event listener not started: SUPERVISOR_TOKEN is unavailable")
+        return None
+
+    def listen() -> None:
+        backoff = 2
+        while True:
+            connection = None
+            try:
+                import websocket
+
+                connection = websocket.create_connection("ws://supervisor/core/websocket", timeout=20)
+                greeting = json.loads(connection.recv())
+                if greeting.get("type") != "auth_required":
+                    raise RuntimeError(f"Unexpected Home Assistant websocket greeting: {greeting.get('type')}")
+                connection.send(json.dumps({
+                    "type": "auth", "access_token": os.environ["SUPERVISOR_TOKEN"],
+                }))
+                auth_result = json.loads(connection.recv())
+                if auth_result.get("type") != "auth_ok":
+                    raise RuntimeError(f"Home Assistant websocket authentication failed: {auth_result.get('message', auth_result.get('type'))}")
+                connection.send(json.dumps({
+                    "id": 1, "type": "subscribe_events", "event_type": RANDOM_PICK_EVENT,
+                }))
+                subscription = json.loads(connection.recv())
+                if not subscription.get("success"):
+                    raise RuntimeError(f"Home Assistant event subscription failed: {subscription}")
+                connection.settimeout(None)
+                backoff = 2
+                log(f"Subscribed to Home Assistant event {RANDOM_PICK_EVENT}")
+                while True:
+                    message = json.loads(connection.recv())
+                    if message.get("type") != "event":
+                        continue
+                    event = message.get("event") or {}
+                    if event.get("event_type") != RANDOM_PICK_EVENT:
+                        continue
+                    data = event.get("data") or {}
+                    source = str(data.get("source") or "home_assistant_event")[:80]
+                    log(f"Received random-pick request from Home Assistant event; source={source}")
+                    client.pick_random_record(source=source)
+            except Exception as exc:
+                log(f"Home Assistant random-pick event listener disconnected; retrying in {backoff}s", error=exc)
+                time.sleep(backoff)
+                backoff = min(backoff * 2, 60)
+            finally:
+                if connection is not None:
+                    try:
+                        connection.close()
+                    except Exception:
+                        pass
+
+    worker = threading.Thread(target=listen, name="discogs-random-pick-events", daemon=True)
+    worker.start()
+    return worker
+
+
 def start_scheduled_collection_refresh(client: CollectionClient) -> threading.Thread | None:
     """Refresh the collection at a configured interval; manual refresh stays available."""
     if not client.refresh_schedule_enabled or not client.token:
@@ -985,6 +1159,20 @@ document.querySelector('#query').addEventListener('input',render);document.query
 
 
 class Handler(BaseHTTPRequestHandler):
+    def do_POST(self) -> None:  # noqa: N802
+        path = urlparse(self.path)
+        if path.path != "/api/random":
+            self.send_error(404)
+            return
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+            request_data = json.loads(self.rfile.read(length) or b"{}") if length else {}
+            source = str(request_data.get("source") or "discogs_app")[:80]
+            self.send_json(200, {"pick": get_client().pick_random_record(source=source)})
+        except Exception as exc:
+            log("Manual random-pick request failed", error=exc)
+            self.send_json(500, {"error": "Could not choose a record. Check the Discogs Connector app log."})
+
     def do_GET(self) -> None:  # noqa: N802
         path = urlparse(self.path)
         if path.path == "/api/status":
@@ -1085,5 +1273,5 @@ if __name__ == "__main__":
     client = get_client()
     log(f"Discogs Connector listening on {PORT}; user={client.username}; token_configured={bool(client.token)}")
     start_scheduled_collection_refresh(client)
+    start_random_pick_event_listener(client)
     ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
-

@@ -1,0 +1,43 @@
+- id: discogs_random_pick_to_tidbyt
+  alias: Discogs random pick - Show on Tidbyt
+  mode: restart
+  triggers:
+    - trigger: state
+      entity_id: sensor.discogs_random_pick
+  conditions:
+    - condition: template
+      value_template: >-
+        {{ state_attr('sensor.discogs_random_pick', 'status') == 'selected'
+           and not is_state('script.turntable_tidbyt_volume_override', 'on') }}
+  actions:
+    - action: script.turn_off
+      target:
+        entity_id: script.show_turntable_now_playing
+    - variables:
+        tidbyt_arguments: >-
+          title={{ state_attr('sensor.discogs_random_pick', 'title') | default('', true) | replace(';', ',') | replace('=', '-') }};artist={{ state_attr('sensor.discogs_random_pick', 'artist') | default('', true) | replace(';', ',') | replace('=', '-') }};year={{ state_attr('sensor.discogs_random_pick', 'release_year') | default('', true) }};artwork_url={{ state_attr('sensor.discogs_random_pick', 'artwork_url') | default('', true) | replace(';', '') }}
+    - action: tidbytassistant.push
+      data:
+        contenttype: custom
+        customcontent: discogspick
+        contentid: discogspick
+        publishtype: foreground
+        devicename:
+          - living_room
+        arguments: "{{ tidbyt_arguments }}"
+    - delay: "00:00:15"
+    - action: tidbytassistant.delete
+      data:
+        contentid: discogspick
+        devicename:
+          - living_room
+    - if:
+        - condition: template
+          value_template: >-
+            {{ is_state('sensor.turntable_playback_state', 'playing')
+               and state_attr('sensor.turntable_now_playing', 'recognition_status') in ['mock', 'recognized']
+               and states('sensor.turntable_now_playing') not in ['', 'Nothing playing', 'unknown', 'unavailable'] }}
+      then:
+        - action: script.turn_on
+          target:
+            entity_id: script.show_turntable_now_playing

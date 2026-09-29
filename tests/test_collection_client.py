@@ -281,6 +281,44 @@ class CollectionClientTests(unittest.TestCase):
         self.assertEqual(result["stats"]["top_artists"][0], {"name": "Artist 1", "count": 1})
         self.assertEqual(self.client.session.calls[-1]["url"], "https://api.discogs.com/users/IPAIRIS")
 
+    def test_random_pick_uses_cached_collection_and_includes_release_and_master_metadata(self) -> None:
+        self.client.collection()
+        self.client.database.save_master(901, {
+            "title": "Master album", "year": 1969,
+            "images": [{"type": "primary", "uri": "https://img.discogs.com/master.jpg"}],
+        })
+        with patch.object(self.module.secrets, "choice", side_effect=lambda rows: rows[0]):
+            release, count = self.client.database.random_collection_release("IPAIRIS")
+        self.assertEqual(count, 2)
+        self.assertEqual(release["release_id"], 101)
+        self.assertEqual(release["artist"], "Artist 1")
+        self.assertEqual(release["release_year"], 1971)
+        self.assertEqual(release["master_year"], 1969)
+        self.assertEqual(release["artwork_url"], "https://img.discogs.com/cover.jpg")
+        self.assertEqual(release["discogs_url"], "https://www.discogs.com/release/101")
+
+    def test_random_pick_reports_unloaded_collection_without_calling_discogs(self) -> None:
+        record, count = self.client.database.random_collection_release("IPAIRIS")
+        self.assertIsNone(record)
+        self.assertEqual(count, 0)
+        self.assertEqual(self.client.session.calls, [])
+
+    def test_random_pick_publishes_sensor_attributes(self) -> None:
+        self.client.collection()
+        published = []
+        with (
+            patch.object(self.module.secrets, "choice", side_effect=lambda rows: rows[0]),
+            patch.object(self.client, "_publish_random_pick", side_effect=lambda state, attrs: published.append((state, attrs))),
+        ):
+            result = self.client.pick_random_record("test")
+        self.assertEqual(result["status"], "selected")
+        self.assertEqual(result["trigger_source"], "test")
+        self.assertEqual(result["release_id"], 101)
+        self.assertEqual(result["release_year"], 1971)
+        self.assertEqual(len(published), 2)
+        self.assertEqual(published[-1][1]["pick_id"], result["pick_id"])
+        self.assertEqual(published[-1][1]["status"], "selected")
+
     def test_marketplace_stats_are_returned_without_persisting_them(self) -> None:
         result = self.client.marketplace_stats(101)
         self.assertEqual(result["lowest_listing"], 12.34)
@@ -332,4 +370,3 @@ class CollectionClientTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

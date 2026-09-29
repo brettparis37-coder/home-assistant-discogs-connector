@@ -1,5 +1,5 @@
 name: Discogs Connector
-version: "0.6.1"
+version: "0.7.0"
 slug: discogs_connector
 description: Search your Discogs collection from a private Home Assistant panel.
 startup: application
@@ -27,4 +27,3 @@ schema:
   refresh_schedule_enabled: bool
   refresh_interval_hours: int(1,168)
   enrich_collection_details: bool
-
