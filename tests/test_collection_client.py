@@ -303,6 +303,12 @@ class CollectionClientTests(unittest.TestCase):
         self.assertEqual(count, 0)
         self.assertEqual(self.client.session.calls, [])
 
+    def test_artwork_color_rejects_non_discogs_hosts(self) -> None:
+        with patch.object(self.module.requests, "get", create=True) as get:
+            color = self.client._dominant_artwork_color("https://example.com/cover.jpg")
+        self.assertEqual(color, "")
+        get.assert_not_called()
+
     def test_collection_artwork_sample_is_bounded_and_uses_cached_rows(self) -> None:
         self.client.collection()
         with self.client.database.connect() as db:
@@ -318,6 +324,7 @@ class CollectionClientTests(unittest.TestCase):
         published = []
         with (
             patch.object(self.module.secrets, "choice", side_effect=lambda rows: rows[0]),
+            patch.object(self.client, "_dominant_artwork_color", return_value="#24384a"),
             patch.object(self.client, "_publish_random_pick", side_effect=lambda state, attrs: published.append((state, attrs))),
         ):
             result = self.client.pick_random_record("test")
@@ -329,6 +336,8 @@ class CollectionClientTests(unittest.TestCase):
         self.assertEqual(published[-1][1]["pick_id"], result["pick_id"])
         self.assertEqual(published[-1][1]["status"], "selected")
         self.assertEqual(result["shuffle_artworks"], ["https://img.discogs.com/cover.jpg"])
+        self.assertEqual(result["final_artwork_url"], "https://img.discogs.com/cover.jpg")
+        self.assertEqual(result["dominant_color"], "#24384a")
 
     def test_marketplace_stats_are_returned_without_persisting_them(self) -> None:
         result = self.client.marketplace_stats(101)
@@ -381,3 +390,4 @@ class CollectionClientTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
