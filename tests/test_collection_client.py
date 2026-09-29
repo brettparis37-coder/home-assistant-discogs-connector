@@ -309,6 +309,18 @@ class CollectionClientTests(unittest.TestCase):
         self.assertEqual(color, "")
         get.assert_not_called()
 
+    def test_artwork_color_samples_discogs_image(self) -> None:
+        image = self.module.Image.new("RGB", (24, 24), (160, 64, 80))
+        buffer = self.module.BytesIO()
+        image.save(buffer, format="PNG")
+        response = types.SimpleNamespace(
+            raise_for_status=lambda: None,
+            iter_content=lambda _size: [buffer.getvalue()],
+        )
+        with patch.object(self.module.requests, "get", return_value=response, create=True):
+            color = self.client._dominant_artwork_color("https://i.discogs.com/cover.png")
+        self.assertRegex(color, r"^#[0-9a-f]{6}$")
+
     def test_collection_artwork_sample_is_bounded_and_uses_cached_rows(self) -> None:
         self.client.collection()
         with self.client.database.connect() as db:
