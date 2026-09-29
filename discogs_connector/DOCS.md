@@ -39,7 +39,7 @@ On first startup of version 0.3.0, the app preserves and imports existing Discog
 ## Install
 
 1. Add this repository in **Settings → Apps → App store → Repositories**.
-2. Install or update **Discogs Connector** to version 0.7.4.
+2. Install or update **Discogs Connector** to version 0.7.5.
 3. In Configuration, confirm the username and enter your Discogs personal access token if needed; save and restart.
 4. Open the **Discogs Collection** panel and load or refresh your collection.
 5. In SQLite Web, set **Database** to `/share/home_apps.sqlite3`, save, and restart SQLite Web. You should then see the `discogs_` tables alongside other custom-app tables.
@@ -48,7 +48,7 @@ On first startup of version 0.3.0, the app preserves and imports existing Discog
 
 The app selects uniformly from distinct releases in the locally cached `discogs_collection_entries` table. A pick does not call Discogs and does not change the collection tables. It publishes the result and a unique `pick_id` to `sensor.discogs_random_pick`, including release/master year and artwork URLs, format, Discogs URL, pick timestamp, and collection size. On app start, a Supervisor-authenticated WebSocket subscribes only to the `discogs_random_pick_requested` event. The HACS card and the optional Hue automation raise that event with a source label.
 
-While a pick is resolving, the app sends the cached cover URLs from SQLite. The card pre-shuffles a unique sequence sized to fit the approximately six-second animation, excludes the selected cover from the shuffle frames, then holds the already-selected album as the final cover before revealing release details. The card and cover frame retain the same dimensions throughout. The app samples a dark dominant cover color and publishes it with the selected record, avoiding browser cross-origin image restrictions. The animation is only a presentation effect; the chosen release is selected from SQLite and does not depend on the animated sequence.
+While a pick is resolving, the app sends the cached cover URLs from SQLite. The card pre-shuffles a unique sequence sized to fit the approximately six-second animation, excludes the selected cover from the shuffle frames, then holds the already-selected album as the final cover before revealing release details. The cover reel uses a perspective stack with adjacent covers peeking into the frame and an easing upward movement; the card and cover frame retain the same dimensions throughout. The app favors brighter, saturated colors when sampling the selected cover and applies that color directly to the full card background. The animation is only a presentation effect; the chosen release is selected from SQLite and does not depend on the animated sequence.
 
 Install the repository in HACS as a **Dashboard** custom repository, install **Discogs Random Record**, then search for that name in the dashboard card picker. The card element type is `custom:discogs-random-record-card`. HACS installs the resource and handles upgrades. If it does not appear immediately, reload the browser after HACS finishes downloading it.
 
