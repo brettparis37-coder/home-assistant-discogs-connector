@@ -1,3 +1,9 @@
+# 0.7.4
+
+- Sample a dark dominant color from the selected Discogs cover in the app and publish it with the pick, avoiding browser cross-origin restrictions.
+- Send the complete cached artwork URL set to the card; pre-shuffle a unique sequence for the visible frames, omit the selected cover from that sequence, and hold the selected cover as the final frame.
+- Keep the random animation duration unchanged.
+
 # 0.7.3
 
 - Expand the shuffle artwork sample to 50 cached covers.
