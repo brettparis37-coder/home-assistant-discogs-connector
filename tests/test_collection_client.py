@@ -329,6 +329,9 @@ class CollectionClientTests(unittest.TestCase):
         sample = self.client.database.collection_artwork_sample("IPAIRIS", limit=1)
         self.assertEqual(len(sample), 1)
         self.assertTrue(sample[0].startswith("https://img.discogs.com/cover-"))
+        all_artwork = self.client.database.collection_artwork_sample("IPAIRIS")
+        self.assertEqual(len(all_artwork), 2)
+        self.assertEqual(len(set(all_artwork)), 2)
         self.assertEqual(len(self.client.session.calls), 2)
 
     def test_random_pick_publishes_sensor_attributes(self) -> None:
