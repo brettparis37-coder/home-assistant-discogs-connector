@@ -19,6 +19,8 @@ from typing import Any, Iterator
 from urllib.parse import urlparse
 
 import requests
+from PIL import Image
+from io import BytesIO
 
 OPTIONS_PATH = Path("/data/options.json")
 DATABASE_PATH = Path("/share/home_apps.sqlite3")
@@ -605,9 +607,8 @@ class CollectionDatabase:
         selected["discogs_url"] = f"https://www.discogs.com/release/{release_id}"
         return selected, len(rows)
 
-    def collection_artwork_sample(self, username: str, limit: int = 50) -> list[str]:
-        """Return a random sample of cached collection cover URLs for the card animation."""
-        limit = max(1, min(50, int(limit)))
+    def collection_artwork_sample(self, username: str, limit: int | None = None) -> list[str]:
+        """Return unique cached cover URLs, optionally capped for callers that need a subset."""
         with self.connect() as connection:
             sync = connection.execute(
                 "SELECT 1 FROM discogs_collection_sync WHERE username = ?", (username,)
@@ -624,7 +625,9 @@ class CollectionDatabase:
                                   NULLIF(m.artwork_url, '')) IS NOT NULL
                    ORDER BY artwork_url COLLATE NOCASE"""
             )]
-        if len(artwork_urls) > limit:
+        if limit is not None:
+            limit = max(1, min(1000, int(limit)))
+        if limit is not None and len(artwork_urls) > limit:
             artwork_urls = secrets.SystemRandom().sample(artwork_urls, limit)
         return artwork_urls
 
@@ -771,7 +774,7 @@ class CollectionClient:
         self.database = CollectionDatabase(DATABASE_PATH, LEGACY_DATABASE_PATHS)
         self.session = requests.Session()
         self.session.headers.update({
-            "User-Agent": "HomeAssistantDiscogsConnector/0.7.0 (personal collection browser)",
+            "User-Agent": "HomeAssistantDiscogsConnector/0.7.4 (personal collection browser)",
             "Accept": "application/vnd.discogs.v2.plain+json",
         })
         if self.token:
@@ -796,6 +799,41 @@ class CollectionClient:
             log(f"Random pick sensor updated: status={attributes.get('status')} pick_id={attributes.get('pick_id')}")
         except Exception as exc:
             log("Could not publish random pick to Home Assistant", error=exc)
+
+    @staticmethod
+    def _dominant_artwork_color(artwork_url: str) -> str:
+        """Sample a dark, readable dominant cover color from a Discogs-hosted image."""
+        parsed = urlparse(artwork_url)
+        host = (parsed.hostname or "").lower()
+        if parsed.scheme != "https" or not (host == "discogs.com" or host.endswith(".discogs.com")):
+            return ""
+        try:
+            response = requests.get(artwork_url, timeout=(2, 2), stream=True, allow_redirects=False,
+                                   headers={"User-Agent": "HomeAssistantDiscogsConnector/0.7.4"})
+            response.raise_for_status()
+            content = bytearray()
+            for chunk in response.iter_content(64 * 1024):
+                content.extend(chunk)
+                if len(content) > 5 * 1024 * 1024:
+                    return ""
+            image = Image.open(BytesIO(content)).convert("RGB")
+            image.thumbnail((48, 48))
+            palette = image.quantize(colors=16).convert("RGB")
+            candidates = []
+            for count, color in (palette.getcolors(48 * 48) or []):
+                r, g, b = color
+                high, low = max(r, g, b), min(r, g, b)
+                if high < 38 or low > 238 or high - low < 18:
+                    continue
+                candidates.append((count, r, g, b))
+            if not candidates:
+                return ""
+            _, r, g, b = max(candidates)
+            dark = [max(24, min(150, round(channel * 0.58))) for channel in (r, g, b)]
+            return "#%02x%02x%02x" % tuple(dark)
+        except Exception as exc:
+            log("Album cover color could not be sampled; the dashboard theme color will be used", error=exc)
+            return ""
 
     def pick_random_record(self, source: str = "dashboard") -> dict[str, Any]:
         """Select from the cached collection and publish the result as a HA sensor."""
@@ -836,6 +874,8 @@ class CollectionClient:
                 "release_year": record.get("release_year"),
                 "master_year": record.get("master_year"),
                 "artwork_url": record.get("artwork_url") or "",
+                "final_artwork_url": record.get("artwork_url") or "",
+                "dominant_color": self._dominant_artwork_color(record.get("artwork_url") or ""),
                 "release_artwork_url": record.get("release_artwork_url") or record.get("thumb") or "",
                 "master_artwork_url": record.get("master_artwork_url") or "",
                 "discogs_url": record.get("discogs_url") or "",
