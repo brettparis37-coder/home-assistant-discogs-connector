@@ -13,11 +13,15 @@ class DiscogsRandomRecordCard extends HTMLElement {
     this._timeout = null;
     this._frameTimer = null;
     this._finishTimer = null;
+    this._lockTimer = null;
     this._shuffleArtworks = [];
     this._shuffleIndex = -1;
     this._shuffleImage = "";
     this._animatedPickId = "";
     this._animationFinished = false;
+    this._finalCoverLocked = false;
+    this._dominantColor = "";
+    this._dominantColorPickId = "";
     this._shuffleDurationMs = 6200;
     this._lastRenderKey = "";
   }
@@ -33,6 +37,12 @@ class DiscogsRandomRecordCard extends HTMLElement {
     const entity = hass?.states?.[this._config.entity];
     const attributes = entity?.attributes || {};
     const incomingPickId = attributes.pick_id || "";
+    if (attributes.status === "selected" && incomingPickId) {
+      this._prepareDominantColor(
+        attributes.artwork_url || attributes.release_artwork_url || attributes.master_artwork_url || "",
+        incomingPickId,
+      );
+    }
     if (!this._seenEntityState) {
       this._lastPickId = incomingPickId;
       this._seenEntityState = true;
@@ -61,6 +71,7 @@ class DiscogsRandomRecordCard extends HTMLElement {
     if (this._spinning && attributes.status === "selected" &&
         attributes.pick_id === this._animatedPickId) {
       this._setShuffleArtworks(attributes.shuffle_artworks);
+      if (this._finalCoverLocked) this._lockFinalCover(attributes);
     } else if (this._spinning && ["empty", "error"].includes(attributes.status) &&
                attributes.pick_id !== this._previousPickId) {
       this._lastPickId = attributes.pick_id || this._lastPickId;
@@ -102,8 +113,17 @@ class DiscogsRandomRecordCard extends HTMLElement {
     this._shuffleImage = "";
     this._shuffleIndex = -1;
     this._animationFinished = false;
+    this._finalCoverLocked = false;
+    this._dominantColor = "";
+    this._dominantColorPickId = "";
     this._setShuffleArtworks(attributes.shuffle_artworks);
     this._advanceShuffleFrame();
+    this._lockTimer = window.setTimeout(() => {
+      const current = this._hass?.states?.[this._config.entity]?.attributes || {};
+      if (current.status === "selected" && current.pick_id === this._animatedPickId) {
+        this._lockFinalCover(current);
+      }
+    }, this._shuffleDurationMs - 700);
     this._finishTimer = window.setTimeout(() => {
       this._spinning = false;
       const current = this._hass?.states?.[this._config.entity];
@@ -120,6 +140,10 @@ class DiscogsRandomRecordCard extends HTMLElement {
 
   _advanceShuffleFrame() {
     if (!this._spinning) return;
+    if (this._finalCoverLocked) {
+      this._frameTimer = window.setTimeout(() => this._advanceShuffleFrame(), 100);
+      return;
+    }
     const elapsed = Date.now() - this._pickStartedAt;
     const progress = Math.min(1, elapsed / this._shuffleDurationMs);
     if (this._shuffleArtworks.length) {
@@ -131,7 +155,7 @@ class DiscogsRandomRecordCard extends HTMLElement {
       this._shuffleImage = this._shuffleArtworks[nextIndex];
     }
     this._render(true);
-    const intervalMs = 75 + Math.round(350 * progress * progress);
+    const intervalMs = 120 + Math.round(305 * progress * progress);
     this._frameTimer = window.setTimeout(() => this._advanceShuffleFrame(), intervalMs);
   }
 
@@ -139,8 +163,10 @@ class DiscogsRandomRecordCard extends HTMLElement {
     this._spinning = false;
     window.clearTimeout(this._frameTimer);
     window.clearTimeout(this._finishTimer);
+    window.clearTimeout(this._lockTimer);
     this._frameTimer = null;
     this._finishTimer = null;
+    this._lockTimer = null;
     this._animatedPickId = "";
     this._animationFinished = false;
     if (clearTimeout) this._clearRequestTimeout();
@@ -176,6 +202,57 @@ class DiscogsRandomRecordCard extends HTMLElement {
     } catch (_) { return ""; }
   }
 
+  _lockFinalCover(attributes = {}) {
+    if (!this._spinning || this._finalCoverLocked) return;
+    const url = this._safeImageUrl(attributes.artwork_url || attributes.release_artwork_url || attributes.master_artwork_url);
+    if (!url) return;
+    this._finalCoverLocked = true;
+    this._shuffleImage = url;
+    this._render(true);
+  }
+
+  _prepareDominantColor(value, pickId) {
+    const url = this._safeImageUrl(value);
+    if (!url || this._dominantColorPickId === pickId) return;
+    this._dominantColorPickId = pickId;
+    this._dominantColor = "";
+    const image = new Image();
+    image.crossOrigin = "anonymous";
+    image.onload = () => {
+      if (this._dominantColorPickId !== pickId) return;
+      try {
+        const canvas = document.createElement("canvas");
+        canvas.width = 24;
+        canvas.height = 24;
+        const context = canvas.getContext("2d", { willReadFrequently: true });
+        context.drawImage(image, 0, 0, 24, 24);
+        const pixels = context.getImageData(0, 0, 24, 24).data;
+        const buckets = new Map();
+        for (let i = 0; i < pixels.length; i += 4) {
+          const r = pixels[i], g = pixels[i + 1], b = pixels[i + 2];
+          const max = Math.max(r, g, b), min = Math.min(r, g, b);
+          if (pixels[i + 3] < 180 || max < 42 || min > 238 || max - min < 18) continue;
+          const key = `${r >> 4},${g >> 4},${b >> 4}`;
+          const entry = buckets.get(key) || { count: 0, r: 0, g: 0, b: 0 };
+          entry.count++;
+          entry.r += r; entry.g += g; entry.b += b;
+          buckets.set(key, entry);
+        }
+        const dominant = [...buckets.values()].sort((a, b) => b.count - a.count)[0];
+        if (!dominant) return;
+        const scale = 0.48;
+        const color = [dominant.r, dominant.g, dominant.b]
+          .map((channel) => Math.round(channel / dominant.count * scale))
+          .map((channel) => Math.max(24, Math.min(145, channel)));
+        this._dominantColor = `rgb(${color.join(",")})`;
+        this._render(true);
+      } catch (_) {
+        // Some artwork hosts disallow canvas sampling; retain the dashboard theme color.
+      }
+    };
+    image.src = url;
+  }
+
   _render(force = false, messageOverride = "") {
     if (!this.shadowRoot || !this._config) return;
     const entity = this._hass?.states?.[this._config.entity];
@@ -188,6 +265,8 @@ class DiscogsRandomRecordCard extends HTMLElement {
     const imageUrl = this._spinning
       ? this._shuffleImage
       : selected ? this._safeImageUrl(a.artwork_url || a.release_artwork_url || a.master_artwork_url) : "";
+    const backgroundColor = !this._spinning && selected && this._dominantColorPickId === a.pick_id
+      ? this._dominantColor : "var(--ha-card-background,var(--card-background-color,#172033))";
     const status = messageOverride || (this._spinning ? "Shuffling through your collection…" :
       this._animationFinished ? "Waiting for the selected album…" :
       selected ? `${a.collection_size || ""} records in your collection` :
@@ -206,21 +285,21 @@ class DiscogsRandomRecordCard extends HTMLElement {
     this.shadowRoot.innerHTML = `
       <style>
         :host{display:block;color:var(--primary-text-color,#e8edf5);font-family:var(--ha-card-header-font-family,inherit)}
-        ha-card{overflow:hidden;border-radius:var(--ha-card-border-radius,18px);background:linear-gradient(135deg,var(--ha-card-background,var(--card-background-color,#172033)),color-mix(in srgb,var(--primary-color,#55c6bc) 11%,var(--ha-card-background,var(--card-background-color,#172033))));border:1px solid color-mix(in srgb,var(--primary-color,#55c6bc) 18%,transparent);box-shadow:var(--ha-card-box-shadow,0 10px 34px #0002)}
-        .layout{display:grid;grid-template-columns:minmax(112px,168px) minmax(0,1fr);gap:clamp(16px,3vw,28px);align-items:center;padding:clamp(16px,3vw,26px)}
+        ha-card{overflow:hidden;border-radius:var(--ha-card-border-radius,18px);background:linear-gradient(135deg,var(--pick-bg),color-mix(in srgb,var(--primary-color,#55c6bc) 11%,var(--pick-bg)));border:1px solid color-mix(in srgb,var(--primary-color,#55c6bc) 18%,transparent);box-shadow:var(--ha-card-box-shadow,0 10px 34px #0002);min-height:218px;box-sizing:border-box}
+        .layout{display:grid;grid-template-columns:clamp(112px,22vw,168px) minmax(0,1fr);gap:clamp(16px,3vw,28px);align-items:center;padding:clamp(16px,3vw,26px);min-height:218px;box-sizing:border-box}
         .art{position:relative;aspect-ratio:1;border-radius:14px;overflow:hidden;background:linear-gradient(150deg,#22334a,#101722);display:grid;place-items:center;perspective:900px;box-shadow:0 8px 24px #0004}
         .cover{width:100%;height:100%;object-fit:cover}.shuffle-cover{animation:cover-flip .34s cubic-bezier(.2,.75,.25,1)}.vinyl{width:82%;height:82%;border-radius:50%;background:repeating-radial-gradient(circle,#111 0 3px,#242c35 3px 4px);display:grid;place-items:center;box-shadow:0 4px 16px #0009}.vinyl i{width:27%;height:27%;border-radius:50%;background:var(--primary-color,#55c6bc);border:4px solid #d4e8e5;box-sizing:border-box}
-        .spinning{animation:disc-spin 1.15s linear infinite}.copy{min-width:0}.eyebrow{text-transform:uppercase;letter-spacing:.15em;font-size:.72rem;font-weight:700;color:var(--primary-color,#55c6bc);margin:0 0 8px}.title{font-size:clamp(1.3rem,3.2vw,2rem);line-height:1.12;letter-spacing:-.025em;margin:0 0 7px;overflow-wrap:anywhere}.artist{font-size:1.02rem;opacity:.88;margin:0}.meta{font-size:.86rem;opacity:.7;margin:10px 0 0;line-height:1.5}.status{font-size:.83rem;opacity:.67;margin:12px 0 0;min-height:1.2em}.controls{display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-top:18px}button{border:0;border-radius:999px;padding:11px 17px;background:var(--primary-color,#55c6bc);color:var(--text-primary-color,#102126);font:600 .92rem/1.2 system-ui,sans-serif;cursor:pointer;transition:transform .16s ease,filter .16s ease}button:hover:not(:disabled){transform:translateY(-1px);filter:brightness(1.06)}button:disabled{opacity:.6;cursor:wait}.release-link{font-size:.82rem;color:var(--secondary-text-color,var(--primary-color,#55c6bc));text-decoration:none}.release-link:hover{text-decoration:underline}.error{color:var(--error-color,#ff8b8b);opacity:1}
+        .spinning{animation:disc-spin 1.15s linear infinite}.copy{min-width:0;min-height:166px;display:flex;flex-direction:column;justify-content:center}.eyebrow{text-transform:uppercase;letter-spacing:.15em;font-size:.72rem;font-weight:700;color:var(--primary-color,#55c6bc);margin:0 0 8px}.title{font-size:clamp(1.3rem,3.2vw,2rem);line-height:1.12;letter-spacing:-.025em;margin:0 0 7px;overflow-wrap:anywhere;min-height:2.24em;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}.artist{font-size:1.02rem;opacity:.88;margin:0;min-height:1.25em}.meta{font-size:.86rem;opacity:.7;margin:8px 0 0;line-height:1.5;min-height:1.3em}.reserved{visibility:hidden}.status{font-size:.83rem;opacity:.67;margin:12px 0 0;min-height:1.2em}.controls{display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-top:14px;min-height:39px}button{border:0;border-radius:999px;padding:11px 17px;background:var(--primary-color,#55c6bc);color:var(--text-primary-color,#102126);font:600 .92rem/1.2 system-ui,sans-serif;cursor:pointer;transition:transform .16s ease,filter .16s ease}button:hover:not(:disabled){transform:translateY(-1px);filter:brightness(1.06)}button:disabled{opacity:.6;cursor:wait}.release-link{font-size:.82rem;color:var(--secondary-text-color,var(--primary-color,#55c6bc));text-decoration:none}.release-link:hover{text-decoration:underline}.error{color:var(--error-color,#ff8b8b);opacity:1}
         @keyframes disc-spin{to{transform:rotate(360deg)}}@keyframes cover-flip{0%{transform:rotateY(-82deg) scale(.92);opacity:.25}55%{opacity:.82}100%{transform:rotateY(0) scale(1);opacity:1}}
-        @media(max-width:440px){.layout{grid-template-columns:92px minmax(0,1fr);gap:14px;padding:14px}.title{font-size:1.2rem}.controls{margin-top:12px}}
+        @media(max-width:440px){ha-card,.layout{min-height:190px}.layout{grid-template-columns:92px minmax(0,1fr);gap:14px;padding:14px}.copy{min-height:160px}.title{font-size:1.2rem}.controls{margin-top:10px}}
         @media(prefers-reduced-motion:reduce){.spinning{animation-duration:4s}.shuffle-cover{animation:none}button{transition:none}}
       </style>
-      <ha-card><div class="layout"><div class="art">${cover}</div><div class="copy">
+      <ha-card style="--pick-bg:${backgroundColor}"><div class="layout"><div class="art">${cover}</div><div class="copy">
         <p class="eyebrow">${this._spinning ? "Vinyl roulette" : selected ? "Your next spin" : "Discogs collection"}</p>
         <h2 class="title">${this._spinning ? "Shuffling albums…" : selected ? this._escape(a.title || entity.state) : "Pick a random record"}</h2>
-        ${selected && !this._spinning ? `<p class="artist">${this._escape(a.artist || "Unknown artist")}</p>` : ""}
-        ${selected && !this._spinning && yearParts.length ? `<p class="meta">${yearParts.join(" · ")}</p>` : ""}
-        ${selected && !this._spinning && formats ? `<p class="meta">${this._escape(formats)}</p>` : ""}
+        <p class="artist ${selected && !this._spinning ? "" : "reserved"}">${selected && !this._spinning ? this._escape(a.artist || "Unknown artist") : "&nbsp;"}</p>
+        <p class="meta ${selected && !this._spinning && yearParts.length ? "" : "reserved"}">${selected && !this._spinning && yearParts.length ? yearParts.join(" · ") : "&nbsp;"}</p>
+        <p class="meta ${selected && !this._spinning && formats ? "" : "reserved"}">${selected && !this._spinning && formats ? this._escape(formats) : "&nbsp;"}</p>
         <p class="status ${messageOverride || a.status === "error" || a.status === "empty" ? "error" : ""}" aria-live="polite">${this._escape(status)}</p>
         <div class="controls"><button type="button" id="pick" ${this._spinning || this._animationFinished ? "disabled" : ""}>${this._spinning ? "Shuffling…" : selected ? "Spin again" : "Pick a record"}</button>${!this._spinning ? releaseLink : ""}</div>
       </div></div></ha-card>`;
@@ -246,4 +325,5 @@ if (!window.customCards.some((card) => card.type === CARD_TAG)) {
 }
 
 console.info("%c DISCOGS RANDOM RECORD %c Discogs Connector", "background:#102126;color:#55c6bc;font-weight:700", "background:#55c6bc;color:#102126;font-weight:700");
+
 
