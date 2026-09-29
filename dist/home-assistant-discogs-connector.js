@@ -15,6 +15,7 @@ class DiscogsRandomRecordCard extends HTMLElement {
     this._finishTimer = null;
     this._lockTimer = null;
     this._shuffleArtworks = [];
+    this._shuffleOrder = [];
     this._shuffleIndex = -1;
     this._shuffleImage = "";
     this._animatedPickId = "";
@@ -41,6 +42,7 @@ class DiscogsRandomRecordCard extends HTMLElement {
       this._prepareDominantColor(
         attributes.artwork_url || attributes.release_artwork_url || attributes.master_artwork_url || "",
         incomingPickId,
+        attributes.dominant_color || "",
       );
     }
     if (!this._seenEntityState) {
@@ -60,7 +62,7 @@ class DiscogsRandomRecordCard extends HTMLElement {
       this._lastPickId = incomingPickId;
       this._startShuffle(attributes, incomingPickId);
     } else if (attributes.status === "picking" && incomingPickId === this._animatedPickId) {
-      this._setShuffleArtworks(attributes.shuffle_artworks);
+      this._setShuffleArtworks(attributes.shuffle_artworks, attributes.final_artwork_url || attributes.artwork_url);
     }
     if (!this._spinning && attributes.status === "selected" &&
         incomingPickId && incomingPickId === this._animatedPickId) {
@@ -70,8 +72,10 @@ class DiscogsRandomRecordCard extends HTMLElement {
     }
     if (this._spinning && attributes.status === "selected" &&
         attributes.pick_id === this._animatedPickId) {
-      this._setShuffleArtworks(attributes.shuffle_artworks);
-      if (this._finalCoverLocked) this._lockFinalCover(attributes);
+      this._setShuffleArtworks(attributes.shuffle_artworks, attributes.final_artwork_url || attributes.artwork_url);
+      if (Date.now() - this._pickStartedAt >= this._shuffleDurationMs - 700) {
+        this._lockFinalCover(attributes);
+      }
     } else if (this._spinning && ["empty", "error"].includes(attributes.status) &&
                attributes.pick_id !== this._previousPickId) {
       this._lastPickId = attributes.pick_id || this._lastPickId;
@@ -91,17 +95,36 @@ class DiscogsRandomRecordCard extends HTMLElement {
     this._timeout = null;
   }
 
-  _setShuffleArtworks(values) {
+  _setShuffleArtworks(values, finalArtwork = "") {
     const next = Array.isArray(values)
       ? [...new Set(values.map((value) => this._safeImageUrl(value)).filter(Boolean))]
       : [];
-    if (next.length) {
+    const finalUrl = this._safeImageUrl(finalArtwork);
+    const samePool = next.length === this._shuffleArtworks.length &&
+      next.every((url, index) => url === this._shuffleArtworks[index]);
+    if (next.length && (!samePool || !this._shuffleOrder.length)) {
       this._shuffleArtworks = next;
-      if (!this._shuffleImage) {
-        this._shuffleIndex = Math.floor(Math.random() * next.length);
-        this._shuffleImage = next[this._shuffleIndex];
+      const candidates = next.filter((url) => url !== finalUrl);
+      for (let i = candidates.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [candidates[i], candidates[j]] = [candidates[j], candidates[i]];
       }
+      this._shuffleOrder = candidates.slice(0, this._shuffleFrameCount());
+      this._shuffleIndex = -1;
+      this._shuffleImage = "";
     }
+  }
+
+  _shuffleFrameCount() {
+    const holdMs = 700;
+    let elapsed = 0;
+    let frames = 0;
+    while (elapsed < this._shuffleDurationMs - holdMs && frames < 1000) {
+      frames++;
+      const progress = elapsed / this._shuffleDurationMs;
+      elapsed += 120 + Math.round(305 * progress * progress);
+    }
+    return frames;
   }
 
   _startShuffle(attributes = {}, pickId = "") {
@@ -110,20 +133,24 @@ class DiscogsRandomRecordCard extends HTMLElement {
     this._pickStartedAt = Date.now();
     this._animatedPickId = pickId;
     this._shuffleArtworks = [];
+    this._shuffleOrder = [];
     this._shuffleImage = "";
     this._shuffleIndex = -1;
     this._animationFinished = false;
     this._finalCoverLocked = false;
     this._dominantColor = "";
     this._dominantColorPickId = "";
-    this._setShuffleArtworks(attributes.shuffle_artworks);
+    this._setShuffleArtworks(attributes.shuffle_artworks, attributes.final_artwork_url || attributes.artwork_url);
     this._advanceShuffleFrame();
-    this._lockTimer = window.setTimeout(() => {
+    const waitForFinalCover = () => {
       const current = this._hass?.states?.[this._config.entity]?.attributes || {};
       if (current.status === "selected" && current.pick_id === this._animatedPickId) {
         this._lockFinalCover(current);
+      } else if (this._spinning) {
+        this._lockTimer = window.setTimeout(waitForFinalCover, 100);
       }
-    }, this._shuffleDurationMs - 700);
+    };
+    this._lockTimer = window.setTimeout(waitForFinalCover, this._shuffleDurationMs - 700);
     this._finishTimer = window.setTimeout(() => {
       this._spinning = false;
       const current = this._hass?.states?.[this._config.entity];
@@ -146,13 +173,9 @@ class DiscogsRandomRecordCard extends HTMLElement {
     }
     const elapsed = Date.now() - this._pickStartedAt;
     const progress = Math.min(1, elapsed / this._shuffleDurationMs);
-    if (this._shuffleArtworks.length) {
-      let nextIndex = Math.floor(Math.random() * this._shuffleArtworks.length);
-      if (this._shuffleArtworks.length > 1 && nextIndex === this._shuffleIndex) {
-        nextIndex = (nextIndex + 1 + Math.floor(Math.random() * (this._shuffleArtworks.length - 1))) % this._shuffleArtworks.length;
-      }
-      this._shuffleIndex = nextIndex;
-      this._shuffleImage = this._shuffleArtworks[nextIndex];
+    if (this._shuffleOrder.length && this._shuffleIndex + 1 < this._shuffleOrder.length) {
+      this._shuffleIndex++;
+      this._shuffleImage = this._shuffleOrder[this._shuffleIndex];
     }
     this._render(true);
     const intervalMs = 120 + Math.round(305 * progress * progress);
@@ -211,11 +234,16 @@ class DiscogsRandomRecordCard extends HTMLElement {
     this._render(true);
   }
 
-  _prepareDominantColor(value, pickId) {
+  _prepareDominantColor(value, pickId, providedColor = "") {
     const url = this._safeImageUrl(value);
     if (!url || this._dominantColorPickId === pickId) return;
     this._dominantColorPickId = pickId;
     this._dominantColor = "";
+    if (/^#[0-9a-f]{6}$/i.test(providedColor)) {
+      this._dominantColor = providedColor;
+      this._render(true);
+      return;
+    }
     const image = new Image();
     image.crossOrigin = "anonymous";
     image.onload = () => {
@@ -265,7 +293,7 @@ class DiscogsRandomRecordCard extends HTMLElement {
     const imageUrl = this._spinning
       ? this._shuffleImage
       : selected ? this._safeImageUrl(a.artwork_url || a.release_artwork_url || a.master_artwork_url) : "";
-    const backgroundColor = !this._spinning && selected && this._dominantColorPickId === a.pick_id
+    const backgroundColor = !this._spinning && selected && this._dominantColorPickId === a.pick_id && this._dominantColor
       ? this._dominantColor : "var(--ha-card-background,var(--card-background-color,#172033))";
     const status = messageOverride || (this._spinning ? "Shuffling through your collection…" :
       this._animationFinished ? "Waiting for the selected album…" :
