@@ -141,6 +141,11 @@ class DiscogsRandomRecordCard extends HTMLElement {
     this._dominantColor = "";
     this._dominantColorPickId = "";
     this._setShuffleArtworks(attributes.shuffle_artworks, attributes.final_artwork_url || attributes.artwork_url);
+    this._prepareDominantColor(
+      attributes.artwork_url || attributes.release_artwork_url || attributes.master_artwork_url || "",
+      pickId,
+      attributes.dominant_color || "",
+    );
     this._advanceShuffleFrame();
     const waitForFinalCover = () => {
       const current = this._hass?.states?.[this._config.entity]?.attributes || {};
