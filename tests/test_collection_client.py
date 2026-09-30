@@ -172,7 +172,7 @@ class CollectionClientTests(unittest.TestCase):
             self.assertEqual(db.execute("SELECT name FROM discogs_artists WHERE discogs_artist_id=31").fetchone()[0], "Artist 1")
             self.assertEqual(db.execute("SELECT catalog_number FROM discogs_release_labels WHERE release_id=101").fetchone()[0], "CAT-1")
             self.assertEqual(db.execute("SELECT value FROM discogs_release_classifications WHERE release_id=101 AND kind='style'").fetchone()[0], "Alternative Rock")
-            self.assertEqual(db.execute("SELECT version FROM app_schema_versions WHERE app_id='discogs_connector'").fetchone()[0], 4)
+            self.assertEqual(db.execute("SELECT version FROM app_schema_versions WHERE app_id='discogs_connector'").fetchone()[0], 5)
         with sqlite3.connect(self.database_path) as db:
             db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         self.client.database = None
@@ -211,6 +211,42 @@ class CollectionClientTests(unittest.TestCase):
         cached = restarted.release(101)
         self.assertTrue(cached["cached"])
         self.assertEqual(restarted.session.calls, [])
+
+    def test_track_facts_survive_release_tracklist_refresh(self) -> None:
+        self.client.release(101)
+        with self.client.database.connect() as db:
+            db.execute(
+                """INSERT INTO discogs_track_fact_sets
+                   (track_key, release_id, track_sequence, track_title_snapshot,
+                    artist_snapshot, album_snapshot, status, fact_count)
+                   VALUES ('101:t1', 101, 1, 'Opening Track', 'Artist Detail',
+                           'Album detail', 'complete', 1)"""
+            )
+            db.execute(
+                """INSERT INTO discogs_track_facts
+                   (track_key, fact_order, fact_text, source_title, source_url)
+                   VALUES ('101:t1', 1, 'A sourced test fact', 'Reference', 'https://example.com')"""
+            )
+
+        refreshed_release = FakeSession().get(
+            "https://api.discogs.com/releases/101", timeout=10
+        ).json()
+        self.client.database.save_release_details(101, refreshed_release, fetched_at=1234567890)
+
+        with self.client.database.connect() as db:
+            fact_set = db.execute(
+                "SELECT status, track_title_snapshot FROM discogs_track_fact_sets WHERE track_key='101:t1'"
+            ).fetchone()
+            fact = db.execute(
+                "SELECT fact_text FROM discogs_track_facts WHERE track_key='101:t1' AND fact_order=1"
+            ).fetchone()
+            track = db.execute(
+                "SELECT title FROM discogs_tracks WHERE track_key='101:t1'"
+            ).fetchone()
+        self.assertEqual(fact_set["status"], "complete")
+        self.assertEqual(fact_set["track_title_snapshot"], "Opening Track")
+        self.assertEqual(fact["fact_text"], "A sourced test fact")
+        self.assertEqual(track["title"], "Opening Track")
 
     def test_master_details_preserve_original_year_and_artwork(self) -> None:
         self.client.database.save_master(901, {

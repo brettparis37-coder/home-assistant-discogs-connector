@@ -13,6 +13,7 @@ The schema is relational for searching and joins:
 - `discogs_artists`, `discogs_release_artists`, `discogs_labels`, and `discogs_release_labels` store reusable artist/label records and release relationships.
 - `discogs_release_formats`, `discogs_format_descriptions`, and `discogs_release_classifications` store formats, genres, and styles.
 - `discogs_tracks`, `discogs_track_credits`, and `discogs_release_credits` store cached tracklists and credits for releases in your collection.
+- `discogs_track_fact_sets` stores per-track fact-generation status and snapshots; `discogs_track_facts` stores up to five ordered facts with source references. These tables are created now but are not populated automatically yet. They intentionally do not cascade-delete when Discogs refreshes a tracklist.
 - `discogs_masters` stores each master release's year and primary artwork URL; release-specific year and artwork remain on `discogs_releases`.
 - `discogs_release_payloads` retains the API response for cache reuse and fields not yet represented as columns. Normalized tables are the queryable representation for common lookups.
 - `discogs_collection_sync` records the latest collection refresh time and item count.
@@ -39,7 +40,7 @@ On first startup of version 0.3.0, the app preserves and imports existing Discog
 ## Install
 
 1. Add this repository in **Settings → Apps → App store → Repositories**.
-2. Install or update **Discogs Connector** to version 0.7.5.
+2. Install or update **Discogs Connector** to version 0.7.6.
 3. In Configuration, confirm the username and enter your Discogs personal access token if needed; save and restart.
 4. Open the **Discogs Collection** panel and load or refresh your collection.
 5. In SQLite Web, set **Database** to `/share/home_apps.sqlite3`, save, and restart SQLite Web. You should then see the `discogs_` tables alongside other custom-app tables.

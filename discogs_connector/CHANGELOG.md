@@ -1,3 +1,8 @@
+# 0.7.6
+
+- Add durable per-track fact tables for researched track facts and their source references; collection refreshes leave these records intact.
+- Reserve five ordered fact slots per track and track fact-set provenance, status, and generation metadata.
+
 # 0.7.5
 
 - Select a brighter, more saturated artwork color while down-weighting dark shadows, and log the sampled color for each pick.

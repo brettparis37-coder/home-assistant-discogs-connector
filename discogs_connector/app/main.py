@@ -69,7 +69,7 @@ class CollectionDatabase:
     """Shared SQLite file with namespaced Discogs tables and per-app migrations."""
 
     APP_ID = "discogs_connector"
-    SCHEMA_VERSION = 4
+    SCHEMA_VERSION = 5
 
     def __init__(self, path: Path, legacy_paths: tuple[Path, ...] = ()) -> None:
         self.path = path
@@ -244,8 +244,40 @@ class CollectionDatabase:
                 fetched_at REAL NOT NULL,
                 payload_json TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS discogs_track_fact_sets (
+                track_key TEXT PRIMARY KEY,
+                release_id INTEGER NOT NULL,
+                track_sequence INTEGER NOT NULL,
+                track_title_snapshot TEXT NOT NULL DEFAULT '',
+                artist_snapshot TEXT NOT NULL DEFAULT '',
+                album_snapshot TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'pending'
+                    CHECK (status IN ('pending', 'complete', 'needs_review', 'stale', 'error')),
+                provider TEXT NOT NULL DEFAULT '',
+                model TEXT NOT NULL DEFAULT '',
+                prompt_version TEXT NOT NULL DEFAULT '',
+                generated_at TEXT,
+                fact_count INTEGER NOT NULL DEFAULT 0 CHECK (fact_count BETWEEN 0 AND 5),
+                error TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+                updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+            );
+            CREATE INDEX IF NOT EXISTS idx_discogs_track_fact_sets_release_order
+                ON discogs_track_fact_sets(release_id, track_sequence);
+            CREATE TABLE IF NOT EXISTS discogs_track_facts (
+                fact_id INTEGER PRIMARY KEY,
+                track_key TEXT NOT NULL,
+                fact_order INTEGER NOT NULL CHECK (fact_order BETWEEN 1 AND 5),
+                fact_text TEXT NOT NULL,
+                source_title TEXT NOT NULL DEFAULT '',
+                source_url TEXT NOT NULL DEFAULT '',
+                source_publisher TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+                UNIQUE (track_key, fact_order)
+            );
+            CREATE INDEX IF NOT EXISTS idx_discogs_track_facts_track_order
+                ON discogs_track_facts(track_key, fact_order);
             """
-        )
 
     @staticmethod
     def _tables(connection: sqlite3.Connection, schema: str = "main") -> set[str]:
