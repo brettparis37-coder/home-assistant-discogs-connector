@@ -1,3 +1,7 @@
+# 0.7.7
+
+- Isolate track-fact table creation in its own schema initializer for a simpler startup migration path.
+
 # 0.7.6
 
 - Add durable per-track fact tables for researched track facts and their source references; collection refreshes leave these records intact.

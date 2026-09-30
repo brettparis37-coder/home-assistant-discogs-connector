@@ -83,6 +83,7 @@ class CollectionDatabase:
             setup.close()
         with self.connect() as connection:
             self._create_schema(connection)
+            self._create_fact_schema(connection)
             self._migrate(connection)
 
     @contextmanager
@@ -244,6 +245,13 @@ class CollectionDatabase:
                 fetched_at REAL NOT NULL,
                 payload_json TEXT NOT NULL
             );
+            """
+        )
+
+    @staticmethod
+    def _create_fact_schema(connection: sqlite3.Connection) -> None:
+        connection.executescript(
+            """
             CREATE TABLE IF NOT EXISTS discogs_track_fact_sets (
                 track_key TEXT PRIMARY KEY,
                 release_id INTEGER NOT NULL,
@@ -278,6 +286,7 @@ class CollectionDatabase:
             CREATE INDEX IF NOT EXISTS idx_discogs_track_facts_track_order
                 ON discogs_track_facts(track_key, fact_order);
             """
+        )
 
     @staticmethod
     def _tables(connection: sqlite3.Connection, schema: str = "main") -> set[str]:
