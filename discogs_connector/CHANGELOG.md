@@ -1,3 +1,8 @@
+# 0.7.8
+
+- Add a bounded, unique Tidbyt shuffle-cover sample while preserving the full artwork list used by the dashboard card.
+- Provide a two-stage random-record Tidbyt display and Home Assistant Hue Dial examples with volume interruption handling.
+
 # 0.7.7
 
 - Isolate track-fact table creation in its own schema initializer for a simpler startup migration path.
