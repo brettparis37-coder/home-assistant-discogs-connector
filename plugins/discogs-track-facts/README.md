@@ -10,15 +10,22 @@ This plugin packages the Discogs Track Facts skill and the Home Assistant Discog
 
 ## Install from this repository
 
-In Codex Desktop, open **Plugins → Install from Marketplace** and choose this repository's marketplace at `.agents/plugins/marketplace.json`, then install **Discogs Track Facts**. If the repository was cloned locally, open it as a trusted Codex project and restart Codex Desktop if the marketplace does not appear.
+In PowerShell, register this GitHub repository as a Codex plugin marketplace. Include both sparse paths so Codex fetches the marketplace catalog and its plugin package:
 
-To add this GitHub repository as a marketplace source, use Codex's plugin marketplace interface and provide:
-
+```powershell
+codex plugin marketplace add https://github.com/brettparis37-coder/home-assistant-discogs-connector.git --sparse .agents/plugins --sparse plugins/discogs-track-facts
+codex plugin marketplace list
 ```
-https://github.com/brettparis37-coder/home-assistant-discogs-connector
+
+Restart Codex Desktop, open **Plugins → Install from Marketplace**, select **Home Assistant Discogs Connector**, and install **Discogs Track Facts**.
+
+After repository updates, refresh the source with:
+
+```powershell
+codex plugin marketplace upgrade home-assistant-discogs-connector
 ```
 
-The plugin is listed in that repository's `.agents/plugins/marketplace.json`.
+The marketplace catalog lives at `.agents/plugins/marketplace.json`; the plugin package lives under `plugins/discogs-track-facts/`.
 
 ## Configure the token in Windows
 
