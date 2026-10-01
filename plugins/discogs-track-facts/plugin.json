@@ -1,0 +1,35 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "discogs-track-facts",
+  "version": "0.1.0",
+  "description": "Research distinctive, sourced facts for Discogs collection tracks and save them through the Home Assistant Discogs Connector.",
+  "author": {
+    "name": "Brett Paris"
+  },
+  "repository": "https://github.com/brettparis37-coder/home-assistant-discogs-connector",
+  "keywords": [
+    "Discogs",
+    "music",
+    "track-facts",
+    "Home Assistant"
+  ],
+  "extensions": {
+    "com.openai": {
+      "interface": {
+        "displayName": "Discogs Track Facts",
+        "shortDescription": "Research and save sourced track facts from your collection.",
+        "longDescription": "Find an owned album by artist and title or Discogs release ID, research five unique 2–3 sentence facts per track, then save and verify them through the Discogs Connector in Home Assistant.",
+        "developerName": "Brett Paris",
+        "category": "Music",
+        "capabilities": [
+          "Read",
+          "Write"
+        ],
+        "websiteURL": "https://github.com/brettparis37-coder/home-assistant-discogs-connector",
+        "defaultPrompt": [
+          "Use Discogs Track Facts to find an album in my collection, research five distinctive sourced facts per track, and save them to Home Assistant."
+        ]
+      }
+    }
+  }
+}
