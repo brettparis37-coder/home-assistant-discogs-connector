@@ -98,7 +98,7 @@ Version 0.8.0 adds `search_collection_releases` to the MCP server. It searches t
 
 The endpoint is separate from the ingress panel and requires a random bearer token of at least 32 characters. Do not expose port 8100 to the public internet.
 
-1. Update **Discogs Connector** to 0.8.0 or newer. In its **Configuration**, set `facts_mcp_token` to a random token of at least 32 characters. Save and restart the app. Confirm the app log says the track-facts MCP is listening on port 8100.
+1. Update **Discogs Connector** to 0.8.1 or newer. In its **Configuration**, set `facts_mcp_token` to a random token of at least 32 characters. Save and restart the app. Confirm the app log says the track-facts MCP is listening on port 8100.
 2. In Windows PowerShell, create and save a random token to your user environment, and copy it to the clipboard:
 
    ```powershell

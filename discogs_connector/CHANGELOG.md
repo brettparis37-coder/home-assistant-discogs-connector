@@ -1,3 +1,7 @@
+# 0.8.1
+
+- Fix startup syntax error caused by stray output lines in the Home Assistant event listener.
+
 # 0.8.0
 
 - Add an MCP tool to search the full locally cached Discogs collection by artist and album, returning owned release IDs, edition details, and track-fact coverage.
