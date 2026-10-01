@@ -40,7 +40,7 @@ On first startup of version 0.3.0, the app preserves and imports existing Discog
 ## Install
 
 1. Add this repository in **Settings → Apps → App store → Repositories**.
-2. Install or update **Discogs Connector** to version 0.7.7.
+2. Install or update **Discogs Connector** to version 0.7.8.
 3. In Configuration, confirm the username and enter your Discogs personal access token if needed; save and restart.
 4. Open the **Discogs Collection** panel and load or refresh your collection.
 5. In SQLite Web, set **Database** to `/share/home_apps.sqlite3`, save, and restart SQLite Web. You should then see the `discogs_` tables alongside other custom-app tables.
@@ -54,6 +54,8 @@ While a pick is resolving, the app sends the cached cover URLs from SQLite. The 
 Install the repository in HACS as a **Dashboard** custom repository, install **Discogs Random Record**, then search for that name in the dashboard card picker. The card element type is `custom:discogs-random-record-card`. HACS installs the resource and handles upgrades. If it does not appear immediately, reload the browser after HACS finishes downloading it.
 
 For Hue Tap Dial Button 4, add this automation to `automations.yaml`:
+
+This simple event automation triggers the dashboard picker. If Button 4 should run the Tidbyt sequence below, use the Tidbyt automation instead of enabling both on the same button.
 
 ```yaml
 - id: discogs_random_record_from_hue_dial
@@ -74,9 +76,19 @@ For Hue Tap Dial Button 4, add this automation to `automations.yaml`:
 
 The random choice samples unique release IDs, so multiple owned copies of a release do not make it more likely. Separate picks may select the same release; recent-play avoidance can be added later using persistent play history.
 
-### Optional Tidbyt preview
+### Tidbyt random record picker
 
-The repository includes [`../examples/tidbyt/discogspick.star`](../examples/tidbyt/discogspick.star) and [`../examples/tidbyt/random-pick-automation.yaml`](../examples/tidbyt/random-pick-automation.yaml). Copy `discogspick.star` into the TidbytAssistant app's configured Tidbyt content directory, then add the automation item to `automations.yaml`. It briefly overrides the living-room display for 15 seconds, then restarts the turntable now-playing script if playback remains recognized. The automation skips its display while the existing volume override script is active. Validate your TidbytAssistant custom-content path before enabling it.
+The repository includes a Tidbyt custom app and Home Assistant script/automation examples in [`../examples/tidbyt/`](../examples/tidbyt/). Button 4 on the Hue Tap Dial requests a pick from the cached SQLite collection, shows a unique cover shuffle for about six seconds, then shows the selected album for ten seconds. The selected cover is the last shuffle frame, and the details view uses the same 32-pixel cover size. No Discogs request is made during a pick.
+
+1. Copy [`discogspick.star`](../examples/tidbyt/discogspick.star) into TidbytAssistant's configured custom-content directory and install/refresh the `discogspick` app for the `living_room` device.
+2. Merge [`random-pick-script.yaml`](../examples/tidbyt/random-pick-script.yaml) into `/config/scripts.yaml`; reload scripts.
+3. Add both automations from [`random-pick-automation.yaml`](../examples/tidbyt/random-pick-automation.yaml) to `/config/automations.yaml`; reload automations. If the older simple Button 4 random-pick automation is already enabled, remove it so the button does not request two picks.
+
+The script temporarily pauses the turntable now-playing loop. Turning the dial during the shuffle or details view cancels the random display, deletes its Tidbyt content, and leaves the existing volume automation free to show the volume. After the ten-second display, the script deletes `discogspick` and restarts the now-playing loop if a recognized record is still playing. If the random picker is cancelled by turning the dial, the existing volume override script already resumes now-playing when appropriate.
+
+The app publishes a separate `tidbyt_shuffle_artworks` attribute containing up to seven cached distractor covers followed by the selected cover. The existing `shuffle_artworks` attribute remains the full collection list for the dashboard animation. `discogspick.star` fetches the small cover set and uses the selected album's dominant color for the details background.
+
+Check the TidbytAssistant custom-content path and confirm the installed content ID is `discogspick` before testing. The automation targets `event.unassigned_hue_tap_dial_switch_1_button_4` and rotary events on `event.unassigned_hue_tap_dial_switch_1_rotary`; adjust those IDs if Home Assistant assigned different entity IDs.
 
 The app requires outbound HTTPS access to `api.discogs.com` and Discogs-hosted image URLs.
 
