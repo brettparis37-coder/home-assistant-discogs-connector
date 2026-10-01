@@ -906,6 +906,7 @@ class CollectionClient:
             try:
                 record, collection_size = self.database.random_collection_release(self.username)
                 shuffle_artworks = self.database.collection_artwork_sample(self.username)
+                tidbyt_shuffle_candidates = self.database.collection_artwork_sample(self.username, limit=7)
             except Exception as exc:
                 failed = {**base, "status": "error", "error": f"Local collection lookup failed: {exc}"[:500]}
                 self._publish_random_pick("Pick failed", failed)
@@ -917,6 +918,15 @@ class CollectionClient:
                 self._publish_random_pick("Collection not loaded", empty)
                 log(f"Random pick requested from {source}; local collection is empty or not loaded")
                 return empty
+            selected_artwork = record.get("artwork_url") or ""
+            tidbyt_shuffle_artworks = [
+                artwork for artwork in tidbyt_shuffle_candidates
+                if artwork and artwork != selected_artwork
+            ][:7]
+            # Hold the chosen cover as the final shuffle frame, so the detail push
+            # resolves to the exact same record rather than an unrelated cover.
+            if selected_artwork:
+                tidbyt_shuffle_artworks.append(selected_artwork)
             attributes = {
                 **base,
                 "status": "selected",
@@ -937,6 +947,7 @@ class CollectionClient:
                 "date_added": record.get("date_added") or "",
                 "collection_size": collection_size,
                 "shuffle_artworks": shuffle_artworks,
+                "tidbyt_shuffle_artworks": tidbyt_shuffle_artworks,
             }
             log(
                 f"Random pick cover palette: release_id={attributes['release_id']} "
