@@ -372,6 +372,9 @@ class CollectionClientTests(unittest.TestCase):
 
     def test_random_pick_publishes_sensor_attributes(self) -> None:
         self.client.collection()
+        with self.client.database.connect() as db:
+            db.execute("UPDATE discogs_releases SET cover_image='https://img.discogs.com/cover-101.jpg' WHERE release_id=101")
+            db.execute("UPDATE discogs_releases SET cover_image='https://img.discogs.com/cover-102.jpg' WHERE release_id=102")
         published = []
         with (
             patch.object(self.module.secrets, "choice", side_effect=lambda rows: rows[0]),
@@ -386,8 +389,14 @@ class CollectionClientTests(unittest.TestCase):
         self.assertEqual(len(published), 2)
         self.assertEqual(published[-1][1]["pick_id"], result["pick_id"])
         self.assertEqual(published[-1][1]["status"], "selected")
-        self.assertEqual(result["shuffle_artworks"], ["https://img.discogs.com/cover.jpg"])
-        self.assertEqual(result["final_artwork_url"], "https://img.discogs.com/cover.jpg")
+        self.assertEqual(result["shuffle_artworks"], [
+            "https://img.discogs.com/cover-101.jpg", "https://img.discogs.com/cover-102.jpg",
+        ])
+        self.assertEqual(result["tidbyt_shuffle_artworks"], [
+            "https://img.discogs.com/cover-102.jpg", "https://img.discogs.com/cover-101.jpg",
+        ])
+        self.assertLessEqual(len(result["tidbyt_shuffle_artworks"]), 8)
+        self.assertEqual(result["final_artwork_url"], "https://img.discogs.com/cover-101.jpg")
         self.assertEqual(result["dominant_color"], "#24384a")
 
     def test_marketplace_stats_are_returned_without_persisting_them(self) -> None:
