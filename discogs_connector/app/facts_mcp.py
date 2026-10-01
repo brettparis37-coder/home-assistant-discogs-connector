@@ -107,9 +107,10 @@ class Handler(BaseHTTPRequestHandler):
                 result = {
                     "protocolVersion": requested_version if requested_version in SUPPORTED_PROTOCOL_VERSIONS else PROTOCOL_VERSION,
                     "capabilities": {"tools": {"listChanged": False}},
-                    "serverInfo": {"name": "discogs-connector", "version": "0.7.9"},
+                    "serverInfo": {"name": "discogs-connector", "version": "0.8.0"},
                     "instructions": (
-                        "Use the Discogs Connector tools to select owned releases, load cached track context, "
+                        "Use search_collection_releases to resolve named albums against the full cached owned collection; "
+                        "use list_releases_needing_facts when choosing an album. Load cached track context, "
                         "save five researched, sourced facts for every song, and verify the completed rows. "
                         "Never send SQL through these tools."
                     ),
@@ -181,6 +182,22 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def _call_tool(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        if name == "search_collection_releases":
+            artist = arguments.get("artist")
+            album = arguments.get("album")
+            if not isinstance(artist, str) or not artist.strip():
+                raise ToolInputError("artist must be a non-empty string.")
+            if not isinstance(album, str) or not album.strip():
+                raise ToolInputError("album must be a non-empty string.")
+            limit = arguments.get("limit", 25)
+            if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 100:
+                raise ToolInputError("limit must be a whole number from 1 to 100.")
+            return {
+                "matches": self.server.database.facts_search_collection(artist, album, limit),
+                "artist_query": artist.strip(),
+                "album_query": album.strip(),
+            }
+
         if name == "list_releases_needing_facts":
             limit = arguments.get("limit", 25)
             if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 100:
@@ -249,6 +266,20 @@ class Handler(BaseHTTPRequestHandler):
 
 
 TOOLS: list[dict[str, Any]] = [
+    {
+        "name": "search_collection_releases",
+        "description": "Search the full locally cached owned Discogs collection by artist and album title. Returns matching exact collection release IDs, edition metadata, and track/fact coverage so an album request can be resolved without scanning a truncated needs-facts list. Use this first when the user names an artist and album but does not provide a release ID. This searches only the local collection cache and does not call Discogs.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "artist": {"type": "string", "minLength": 1},
+                "album": {"type": "string", "minLength": 1},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 25},
+            },
+            "required": ["artist", "album"],
+            "additionalProperties": False,
+        },
+    },
     {
         "name": "list_releases_needing_facts",
         "description": "List owned Discogs releases where one or more song tracks do not yet have five saved facts. Releases without a cached tracklist are included last; call get_release_tracks to load their Discogs tracklist. Use this when the user asks you to choose an album.",
