@@ -1,0 +1,17 @@
+{
+  "name": "home-assistant-discogs-connector",
+  "plugins": [
+    {
+      "name": "discogs-track-facts",
+      "source": {
+        "source": "local",
+        "path": "./plugins/discogs-track-facts"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Music"
+    }
+  ]
+}

@@ -1,0 +1,10 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+  "mcpServers": {
+    "discogs-connector": {
+      "type": "streamable-http",
+      "url": "http://homeassistant.local:8100/mcp",
+      "bearer_token_env_var": "DISCOGS_CONNECTOR_MCP_TOKEN"
+    }
+  }
+}
