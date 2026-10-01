@@ -1,3 +1,8 @@
+# 0.8.0
+
+- Add an MCP tool to search the full locally cached Discogs collection by artist and album, returning owned release IDs, edition details, and track-fact coverage.
+- Allow named album requests to resolve their exact cached collection release without depending on the first 100 needs-facts candidates.
+
 # 0.7.9
 
 - Add a bearer-token-protected, stateless MCP endpoint with scoped tools for choosing collection releases, reading track context, saving five facts per song in one transaction, and verifying saved rows.

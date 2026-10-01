@@ -663,6 +663,70 @@ class CollectionDatabase:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def facts_search_collection(self, artist: str, album: str, limit: int = 25) -> list[dict[str, Any]]:
+        """Search all locally cached owned releases by artist and album title."""
+        artist = str(artist or "").strip()
+        album = str(album or "").strip()
+        if not artist or not album:
+            raise ValueError("Both artist and album are required.")
+        bounded_limit = max(1, min(100, int(limit)))
+        artist_pattern = "%" + artist.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+        album_pattern = "%" + album.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+        with self.connect() as connection:
+            rows = connection.execute(
+                """WITH fact_rows AS (
+                       SELECT track_key, COUNT(*) AS stored_fact_count
+                       FROM discogs_track_facts GROUP BY track_key
+                   ), track_coverage AS (
+                       SELECT t.release_id, COUNT(*) AS track_count,
+                              SUM(CASE WHEN fs.status IN ('complete', 'needs_review')
+                                            AND fs.fact_count = 5
+                                            AND COALESCE(fr.stored_fact_count, 0) = 5
+                                       THEN 1 ELSE 0 END) AS facted_track_count
+                       FROM discogs_tracks t
+                       LEFT JOIN discogs_track_fact_sets fs USING (track_key)
+                       LEFT JOIN fact_rows fr USING (track_key)
+                       WHERE t.track_type = 'track'
+                       GROUP BY t.release_id
+                   )
+                   SELECT r.release_id, r.title AS album, r.year AS release_year,
+                          m.year AS master_year, r.uri AS discogs_release_uri,
+                          (SELECT group_concat(artist_name, ', ')
+                           FROM (SELECT DISTINCT a.name AS artist_name
+                                 FROM discogs_release_artists ra
+                                 JOIN discogs_artists a USING (artist_key)
+                                 WHERE ra.release_id = r.release_id
+                                 ORDER BY a.name COLLATE NOCASE)) AS artists,
+                          MAX(e.date_added) AS date_added,
+                          COALESCE(tc.track_count, 0) AS track_count,
+                          COALESCE(tc.facted_track_count, 0) AS facted_track_count,
+                          CASE WHEN tc.release_id IS NULL THEN NULL
+                               ELSE tc.track_count - tc.facted_track_count END AS tracks_missing_facts,
+                          (tc.release_id IS NOT NULL) AS tracklist_cached,
+                          CASE WHEN lower(r.title) = lower(?) THEN 1 ELSE 0 END AS exact_album_match,
+                          EXISTS (SELECT 1 FROM discogs_release_artists ra
+                                  JOIN discogs_artists a USING (artist_key)
+                                  WHERE ra.release_id = r.release_id
+                                    AND lower(a.name) = lower(?)) AS exact_artist_match
+                   FROM discogs_collection_entries e
+                   JOIN discogs_releases r USING (release_id)
+                   LEFT JOIN discogs_masters m ON m.master_id = r.master_id
+                   LEFT JOIN track_coverage tc USING (release_id)
+                   WHERE lower(r.title) LIKE lower(?) ESCAPE '\\'
+                     AND EXISTS (SELECT 1 FROM discogs_release_artists ra
+                                 JOIN discogs_artists a USING (artist_key)
+                                 WHERE ra.release_id = r.release_id
+                                   AND lower(a.name) LIKE lower(?) ESCAPE '\\')
+                   GROUP BY r.release_id
+                   ORDER BY exact_album_match DESC, exact_artist_match DESC,
+                            (tc.release_id IS NOT NULL) DESC,
+                            tracks_missing_facts DESC, e.date_added DESC,
+                            r.release_id DESC
+                   LIMIT ?""",
+                (album, artist, album_pattern, artist_pattern, bounded_limit),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
     def facts_release_tracks(self, release_id: int) -> dict[str, Any]:
         """Return exact stored track keys and research context for an owned release."""
         with self.connect() as connection:
@@ -1104,7 +1168,7 @@ class CollectionClient:
         self.database = CollectionDatabase(DATABASE_PATH, LEGACY_DATABASE_PATHS)
         self.session = requests.Session()
         self.session.headers.update({
-            "User-Agent": "HomeAssistantDiscogsConnector/0.7.9 (personal collection browser)",
+            "User-Agent": "HomeAssistantDiscogsConnector/0.8.0 (personal collection browser)",
             "Accept": "application/vnd.discogs.v2.plain+json",
         })
         if self.token:
@@ -1474,6 +1538,9 @@ def start_random_pick_event_listener(client: CollectionClient) -> threading.Thre
             connection = None
             try:
                 import websocket
+Warning: truncated output (original token count: 5341)
+Total output lines: 220
+
 
                 connection = websocket.create_connection("ws://supervisor/core/websocket", timeout=20)
                 greeting = json.loads(connection.recv())
@@ -1568,12 +1635,7 @@ document.querySelector('#results').innerHTML=found.length?found.map(x=>`<tr><td>
  document.querySelector('#count').textContent=`${found.length} of ${rows.length} records`;
 }
 function list(items){return items?.length?`<ol class="list">${items.map(x=>`<li>${esc(x.name)} <span class="muted">(${esc(x.count)})</span></li>`).join('')}</ol>`:'<p class="muted">No data available</p>';}
-async function loadOverview(){const target=document.querySelector('#overview');target.innerHTML='<p class="muted">Loading profile and collection insights…</p>';try{const r=await fetch('api/overview');const data=await r.json();if(!r.ok)throw new Error(data.error||'Could not load overview');const p=data.profile||{},s=data.stats||{};target.innerHTML=`<section class="block"><h2>${esc(p.name||p.username||'Discogs profile')}</h2><p class="muted">${esc([p.location,p.registered&&('Member since '+String(p.registered).slice(0,4))].filter(Boolean).join(' · '))}</p>${p.profile?`<p>${esc(p.profile)}</p>`:''}</section><div class="stats"><div class="stat">Records<strong>${esc(s.record_count)}</strong></div><div class="stat">Average release year<strong>${esc(s.average_year||'—')}</strong><span class="muted">${esc(s.dated_count)} with a year listed</span></div><div class="stat">Release year range<strong>${esc(s.oldest_year||'—')} – ${esc(s.newest_year||'—')}</strong></div><div class="stat">Most common decade<strong>${esc(s.top_decades?.[0]?.name||'—')}</strong><span class="muted">${esc(s.top_decades?.[0]?.count||0)} records</span></div></div><div class="overview-grid"><section class="block"><h3>Most represented artists</h3>${list(s.top_artists)}</section><section class="block"><h3>Favorite genres</h3>${list(s.top_genres)}</section><section class="block"><h3>Styles</h3>${list(s.top_styles)}</section><section class="block"><h3>Formats</h3>${list(s.top_formats)}</section><section class="block"><h3>Labels</h3>${list(s.top_labels)}</section><section class="block"><h3>Collection age</h3>${list(s.top_decades)}</section></div>`;}catch(e){target.innerHTML=`<p class="error">${esc(e.message)}</p><button onclick="loadOverview()">Retry</button>`;}}
-async function load(force=false){const st=document.querySelector('#status');st.className='muted';st.textContent=force?'Refreshing from Discogs…':'Loading your collection…';const button=document.querySelector('#refresh');if(button)button.disabled=true;
- try{const r=await fetch('api/collection'+(force?'?refresh=1':''));const data=await r.json();if(!r.ok)throw new Error(data.error||'Request failed');rows=data.items||[];const age=Math.max(0,Math.round((data.status.age_seconds||0)/60));st.textContent=`${esc(data.status.username)} · ${rows.length} records · refreshed ${age} min ago`;render();loadOverview();}
- catch(e){st.className='error';st.textContent=e.message;}
- finally{if(button)button.disabled=false;}}
-function showTab(tab){document.querySelectorAll('.tab').forEach(b=>b.classList.toggle('active',b.dataset.tab===tab));document.querySelector('#overview-view').hidden=tab!=='overview';document.querySelector('#collection-view').hidden=tab!=='collection';}
+async function loadOverview(){const target=document.querySelector('#overview');target.innerHTML='<p class="muted">Loading profile and collection insights…</p>';try{const r=await fetch('api/overview');const data=await r.json();if(!r.ok)throw new Error(data.error||'Could not load overview');const p=data.profile||{},s=data.stats||{};target.innerHTML=`<section class="block"><h2>${esc(p.name||p.username||'Discogs profile')}</h2><p class="muted">${esc([p.location,p.registered&&('Member since '+String(p.registered).slice(0,4))].filter(Boolean).join(' · '))}</p>${p.profile?`<p>${esc(p.profile)}</p>`:''}</section><div class="stats"><div class="stat">Records<strong>${esc(s.record_count)}</strong></div><div class="stat">Average release year<strong>${esc(s.average_year||'—')}</strong><span class="muted">${esc(s.dated_count)} with a year listed</span></div><div class="stat">Release year range<strong>${esc(s.oldest_year||'—')} – ${esc(s.newest_year||'—')}</strong></div><div class="stat">Most common decade<strong>${esc(s.top_decades?.[0]?.name||'—')}</strong><span class="muted">${esc(s.top_decades?.[0]?.count||0)} records</span></div></div><div class="overview-grid"><section class="block"><h3>Most represented artists</h3>${list(s.top_artists)}</section><section class="block"><h3>Favorite genres</h3>${list(s.top_genres…341 tokens truncated…ew').hidden=tab!=='collection';}
 document.querySelectorAll('.tab').forEach(b=>b.addEventListener('click',()=>showTab(b.dataset.tab)));
 function backToCollection(){location.hash='';document.querySelector('#release-view').hidden=true;showTab('collection');}
 async function showRelease(id){if(!/^\d+$/.test(id))return;document.querySelector('#overview-view').hidden=true;document.querySelector('#collection-view').hidden=true;const view=document.querySelector('#release-view');view.hidden=false;view.innerHTML='<button id="back">← Back to collection</button><p class="muted">Loading release details…</p>';view.querySelector('#back').onclick=backToCollection;

@@ -43,4 +43,4 @@ The repository also provides a two-stage Tidbyt picker in [`examples/tidbyt/`](e
 
 
 
-The app also provides a bearer-token-protected track-facts MCP endpoint on port `8100` for AI-assisted fact work. It exposes only collection release selection, track-context reads, fact writes for one release, and write verification; it does not accept arbitrary SQL. See [`discogs_connector/DOCS.md`](discogs_connector/DOCS.md) for Windows PowerShell and Codex setup.
+The app also provides a bearer-token-protected track-facts MCP endpoint on port `8100` for AI-assisted fact work. It exposes a full cached-collection search by artist and album, collection release selection, track-context reads, fact writes for one release, and write verification; it does not accept arbitrary SQL. See [`discogs_connector/DOCS.md`](discogs_connector/DOCS.md) for Windows PowerShell and Codex setup.
