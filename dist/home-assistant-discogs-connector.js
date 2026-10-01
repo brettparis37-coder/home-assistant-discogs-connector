@@ -64,7 +64,10 @@ class DiscogsRandomRecordCard extends HTMLElement {
   }
 
   _currentEntity() {
-    return this._states?.[this._config.entity] || this._hass?.states?.[this._config.entity];
+    // Lovelace's hass object is the latest full state snapshot. The subscribed
+    // context can briefly lag while the shuffle timer is finishing, so prefer
+    // hass here to avoid rendering the previous/default card background.
+    return this._hass?.states?.[this._config.entity] || this._states?.[this._config.entity];
   }
 
   _handleEntityUpdate(entity) {
@@ -406,5 +409,4 @@ if (!window.customCards.some((card) => card.type === CARD_TAG)) {
 }
 
 console.info("%c DISCOGS RANDOM RECORD %c Discogs Connector", "background:#102126;color:#55c6bc;font-weight:700", "background:#55c6bc;color:#102126;font-weight:700");
-
 
