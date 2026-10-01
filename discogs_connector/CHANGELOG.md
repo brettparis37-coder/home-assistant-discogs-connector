@@ -1,3 +1,8 @@
+# 0.7.9
+
+- Add a bearer-token-protected, stateless MCP endpoint with scoped tools for choosing collection releases, reading track context, saving five facts per song in one transaction, and verifying saved rows.
+- Keep MCP on a dedicated mapped port; it does not expose arbitrary SQL or the existing ingress web panel.
+
 # 0.7.8
 
 - Add a bounded, unique Tidbyt shuffle-cover sample while preserving the full artwork list used by the dashboard card.

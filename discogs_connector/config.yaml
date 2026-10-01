@@ -1,5 +1,5 @@
 name: Discogs Connector
-version: "0.7.8"
+version: "0.7.9"
 slug: discogs_connector
 description: Search your Discogs collection from a private Home Assistant panel.
 homeassistant_api: true
@@ -11,6 +11,10 @@ arch:
   - aarch64
 ingress: true
 ingress_port: 8099
+ports:
+  8100/tcp: 8100
+ports_description:
+  8100/tcp: Discogs track facts MCP (bearer token required)
 panel_icon: mdi:disc
 panel_title: Discogs Collection
 panel_admin: false
@@ -25,6 +29,7 @@ options:
 schema:
   discogs_username: str
   discogs_token: password
+  facts_mcp_token: password?
   refresh_schedule_enabled: bool
   refresh_interval_hours: int(1,168)
   enrich_collection_details: bool

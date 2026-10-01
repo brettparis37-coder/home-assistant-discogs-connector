@@ -23,6 +23,8 @@ from urllib.parse import urlparse
 import requests
 from PIL import Image
 
+from facts_mcp import MCP_PORT, start_facts_mcp
+
 OPTIONS_PATH = Path("/data/options.json")
 DATABASE_PATH = Path("/share/home_apps.sqlite3")
 LEGACY_DATABASE_PATHS = (
@@ -608,6 +610,292 @@ class CollectionDatabase:
                     "SELECT value FROM discogs_release_classifications WHERE release_id=? AND kind='style' ORDER BY value COLLATE NOCASE", (rid,))]
         return items, {"synced_at": float(sync["synced_at"]), "total": int(sync["total"])}
 
+    def facts_releases_needing_work(self, limit: int = 25) -> list[dict[str, Any]]:
+        """Return owned releases with at least one track missing five saved facts."""
+        bounded_limit = max(1, min(100, int(limit)))
+        with self.connect() as connection:
+            rows = connection.execute(
+                """WITH fact_rows AS (
+                       SELECT track_key, COUNT(*) AS stored_fact_count
+                       FROM discogs_track_facts
+                       GROUP BY track_key
+                   ), track_coverage AS (
+                       SELECT t.release_id,
+                              COUNT(*) AS track_count,
+                              SUM(CASE
+                                    WHEN fs.status IN ('complete', 'needs_review')
+                                     AND fs.fact_count = 5
+                                     AND COALESCE(fr.stored_fact_count, 0) = 5
+                                    THEN 1 ELSE 0
+                                  END) AS complete_track_count
+                       FROM discogs_tracks t
+                       LEFT JOIN discogs_track_fact_sets fs USING (track_key)
+                       LEFT JOIN fact_rows fr USING (track_key)
+                       WHERE t.track_type = 'track'
+                       GROUP BY t.release_id
+                   ), owned_releases AS (
+                       SELECT DISTINCT release_id FROM discogs_collection_entries
+                   )
+                   SELECT r.release_id, r.title AS album, r.year AS release_year,
+                          m.year AS master_year,
+                          (SELECT group_concat(artist_name, ', ')
+                           FROM (
+                               SELECT DISTINCT a.name AS artist_name
+                               FROM discogs_release_artists ra
+                               JOIN discogs_artists a USING (artist_key)
+                               WHERE ra.release_id = r.release_id
+                               ORDER BY a.name COLLATE NOCASE
+                           )) AS artists,
+                          COALESCE(tc.track_count, 0) AS track_count,
+                          COALESCE(tc.complete_track_count, 0) AS facted_track_count,
+                          CASE WHEN tc.release_id IS NULL THEN NULL
+                               ELSE tc.track_count - tc.complete_track_count END AS tracks_missing_facts,
+                          (tc.release_id IS NOT NULL) AS tracklist_cached
+                   FROM owned_releases o
+                   JOIN discogs_releases r USING (release_id)
+                   LEFT JOIN track_coverage tc USING (release_id)
+                   LEFT JOIN discogs_masters m ON m.master_id = r.master_id
+                   WHERE tc.release_id IS NULL OR tc.track_count > tc.complete_track_count
+                   ORDER BY tracklist_cached DESC, tracks_missing_facts DESC,
+                            artists COLLATE NOCASE, album COLLATE NOCASE
+                   LIMIT ?""",
+                (bounded_limit,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def facts_release_tracks(self, release_id: int) -> dict[str, Any]:
+        """Return exact stored track keys and research context for an owned release."""
+        with self.connect() as connection:
+            release = connection.execute(
+                """SELECT r.release_id, r.title AS album, r.year AS release_year,
+                          r.released AS exact_release_date, r.country, r.uri AS discogs_release_uri,
+                          r.master_id, m.year AS master_year
+                   FROM discogs_releases r
+                   LEFT JOIN discogs_masters m ON m.master_id = r.master_id
+                   WHERE r.release_id = ?
+                     AND EXISTS (SELECT 1 FROM discogs_collection_entries e WHERE e.release_id = r.release_id)""",
+                (release_id,),
+            ).fetchone()
+            if release is None:
+                raise ValueError("That release is not present in the cached Discogs collection.")
+
+            album_artists = [row[0] for row in connection.execute(
+                """SELECT DISTINCT a.name
+                   FROM discogs_release_artists ra
+                   JOIN discogs_artists a USING (artist_key)
+                   WHERE ra.release_id = ?
+                   ORDER BY a.name COLLATE NOCASE""",
+                (release_id,),
+            )]
+            genres = [row[0] for row in connection.execute(
+                "SELECT value FROM discogs_release_classifications WHERE release_id = ? AND kind = 'genre' ORDER BY value COLLATE NOCASE",
+                (release_id,),
+            )]
+            styles = [row[0] for row in connection.execute(
+                "SELECT value FROM discogs_release_classifications WHERE release_id = ? AND kind = 'style' ORDER BY value COLLATE NOCASE",
+                (release_id,),
+            )]
+            labels = [dict(row) for row in connection.execute(
+                """SELECT l.name, rl.catalog_number
+                   FROM discogs_release_labels rl
+                   JOIN discogs_labels l USING (label_key)
+                   WHERE rl.release_id = ?
+                   ORDER BY rl.position""",
+                (release_id,),
+            )]
+            rows = connection.execute(
+                """SELECT t.track_key, t.release_id, t.sequence AS track_sequence,
+                          t.position, t.title AS track_title, t.duration, t.duration_ms,
+                          fs.status AS facts_status, fs.fact_count AS saved_fact_count,
+                          (SELECT COUNT(*) FROM discogs_track_facts f WHERE f.track_key = t.track_key)
+                              AS stored_fact_count
+                   FROM discogs_tracks t
+                   LEFT JOIN discogs_track_fact_sets fs USING (track_key)
+                   WHERE t.release_id = ? AND t.track_type = 'track'
+                   ORDER BY t.sequence""",
+                (release_id,),
+            ).fetchall()
+            tracks: list[dict[str, Any]] = []
+            for row in rows:
+                track = dict(row)
+                track_artists = [artist[0] for artist in connection.execute(
+                    """SELECT DISTINCT a.name
+                       FROM discogs_track_credits tc
+                       JOIN discogs_artists a USING (artist_key)
+                       WHERE tc.track_key = ?
+                       ORDER BY a.name COLLATE NOCASE""",
+                    (track["track_key"],),
+                )]
+                track["track_artists"] = track_artists
+                track["artist_snapshot"] = ", ".join(track_artists or album_artists)
+                tracks.append(track)
+
+        return {
+            "release": {**dict(release), "album_artists": album_artists, "genres": genres, "styles": styles, "labels": labels},
+            "tracks": tracks,
+        }
+
+    def save_release_track_facts(
+        self,
+        release_id: int,
+        tracks: list[dict[str, Any]],
+        *,
+        model: str = "",
+        prompt_version: str = "discogs-track-facts-v2",
+    ) -> dict[str, Any]:
+        """Replace every song's five facts for one owned release in one transaction."""
+        if not isinstance(tracks, list) or not tracks:
+            raise ValueError("Provide facts for every song track on the release.")
+        model = str(model or "")[:120]
+        prompt_version = str(prompt_version or "discogs-track-facts-v2")[:120]
+        if not prompt_version:
+            prompt_version = "discogs-track-facts-v2"
+
+        with self.connect() as connection:
+            release = connection.execute(
+                """SELECT r.title AS album
+                   FROM discogs_releases r
+                   WHERE r.release_id = ?
+                     AND EXISTS (SELECT 1 FROM discogs_collection_entries e WHERE e.release_id = r.release_id)""",
+                (release_id,),
+            ).fetchone()
+            if release is None:
+                raise ValueError("That release is not present in the cached Discogs collection.")
+
+            track_rows = connection.execute(
+                """SELECT t.track_key, t.sequence AS track_sequence, t.title AS track_title,
+                          (SELECT group_concat(artist_name, ', ')
+                           FROM (
+                               SELECT DISTINCT a.name AS artist_name
+                               FROM discogs_track_credits tc
+                               JOIN discogs_artists a USING (artist_key)
+                               WHERE tc.track_key = t.track_key
+                               ORDER BY a.name COLLATE NOCASE
+                           )) AS track_artists,
+                          (SELECT group_concat(artist_name, ', ')
+                           FROM (
+                               SELECT DISTINCT a.name AS artist_name
+                               FROM discogs_release_artists ra
+                               JOIN discogs_artists a USING (artist_key)
+                               WHERE ra.release_id = t.release_id
+                               ORDER BY a.name COLLATE NOCASE
+                           )) AS album_artists
+                   FROM discogs_tracks t
+                   WHERE t.release_id = ? AND t.track_type = 'track'
+                   ORDER BY t.sequence""",
+                (release_id,),
+            ).fetchall()
+            expected = {row["track_key"]: row for row in track_rows}
+            if not expected:
+                raise ValueError("The selected release has no cached song tracks.")
+
+            provided_keys: list[str] = []
+            for track in tracks:
+                if not isinstance(track, dict):
+                    raise ValueError("Each track entry must be an object.")
+                key = str(track.get("track_key") or "")
+                if not key or key in provided_keys:
+                    raise ValueError("Each exact track_key must appear once.")
+                provided_keys.append(key)
+                if key not in expected:
+                    raise ValueError("A supplied track_key does not belong to this release.")
+                facts = track.get("facts")
+                if not isinstance(facts, list) or len(facts) != 5:
+                    raise ValueError(f"Track {key} must have exactly five facts.")
+                distinct_text: set[str] = set()
+                for fact in facts:
+                    if not isinstance(fact, dict):
+                        raise ValueError(f"Every fact for track {key} must be an object.")
+                    text = str(fact.get("fact_text") or "").strip()
+                    title = str(fact.get("source_title") or "").strip()
+                    url = str(fact.get("source_url") or "").strip()
+                    publisher = str(fact.get("source_publisher") or "").strip()
+                    parsed_url = urlparse(url)
+                    if not text or not title or not publisher or parsed_url.scheme not in ("http", "https") or not parsed_url.netloc:
+                        raise ValueError(f"Every fact for track {key} needs text and a titled, linked source.")
+                    normalized_text = " ".join(text.split()).casefold()
+                    if normalized_text in distinct_text:
+                        raise ValueError(f"Track {key} contains duplicate facts.")
+                    distinct_text.add(normalized_text)
+                    fact["_normalized"] = (text[:4000], title[:500], url[:2000], publisher[:300])
+
+            if set(provided_keys) != set(expected):
+                missing = len(set(expected) - set(provided_keys))
+                raise ValueError(f"Include every song track in this release; {missing} track(s) are missing.")
+
+            connection.execute("BEGIN IMMEDIATE")
+            for track in tracks:
+                key = str(track["track_key"])
+                row = expected[key]
+                artist_snapshot = str(row["track_artists"] or row["album_artists"] or "")
+                connection.execute(
+                    """INSERT INTO discogs_track_fact_sets (
+                           track_key, release_id, track_sequence, track_title_snapshot,
+                           artist_snapshot, album_snapshot, status, provider, model,
+                           prompt_version, generated_at, fact_count, error, updated_at
+                       ) VALUES (?, ?, ?, ?, ?, ?, 'complete', 'Codex research', ?, ?,
+                                 strftime('%Y-%m-%dT%H:%M:%fZ','now'), 5, '', strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+                       ON CONFLICT(track_key) DO UPDATE SET
+                           release_id=excluded.release_id,
+                           track_sequence=excluded.track_sequence,
+                           track_title_snapshot=excluded.track_title_snapshot,
+                           artist_snapshot=excluded.artist_snapshot,
+                           album_snapshot=excluded.album_snapshot,
+                           status='complete', provider='Codex research', model=excluded.model,
+                           prompt_version=excluded.prompt_version, generated_at=excluded.generated_at,
+                           fact_count=5, error='', updated_at=excluded.updated_at""",
+                    (key, release_id, row["track_sequence"], row["track_title"],
+                     artist_snapshot, release["album"], model, prompt_version),
+                )
+                connection.execute("DELETE FROM discogs_track_facts WHERE track_key = ?", (key,))
+                connection.executemany(
+                    """INSERT INTO discogs_track_facts (
+                           track_key, fact_order, fact_text, source_title, source_url, source_publisher
+                       ) VALUES (?, ?, ?, ?, ?, ?)""",
+                    [(key, order, *fact["_normalized"]) for order, fact in enumerate(track["facts"], 1)],
+                )
+
+        return {"release_id": release_id, "album": release["album"], "track_count": len(expected), "fact_count": len(expected) * 5, "status": "complete"}
+
+    def verify_release_track_facts(self, release_id: int) -> dict[str, Any]:
+        """Return persisted fact rows and consistency counts for one owned release."""
+        with self.connect() as connection:
+            release = connection.execute(
+                "SELECT title FROM discogs_releases WHERE release_id = ?", (release_id,)
+            ).fetchone()
+            if release is None:
+                raise ValueError("That release is not present in the Discogs database.")
+            tracks = [dict(row) for row in connection.execute(
+                """SELECT t.track_key, t.sequence AS track_sequence, t.title AS track_title,
+                          fs.status, fs.fact_count,
+                          COUNT(f.fact_id) AS stored_fact_count
+                   FROM discogs_tracks t
+                   LEFT JOIN discogs_track_fact_sets fs USING (track_key)
+                   LEFT JOIN discogs_track_facts f USING (track_key)
+                   WHERE t.release_id = ? AND t.track_type = 'track'
+                   GROUP BY t.track_key
+                   ORDER BY t.sequence""",
+                (release_id,),
+            )]
+            facts = [dict(row) for row in connection.execute(
+                """SELECT f.track_key, s.track_sequence, s.track_title_snapshot AS track_title,
+                          f.fact_order, f.fact_text, f.source_title, f.source_url, f.source_publisher,
+                          s.status, s.fact_count
+                   FROM discogs_track_facts f
+                   JOIN discogs_track_fact_sets s USING (track_key)
+                   WHERE s.release_id = ?
+                   ORDER BY s.track_sequence, f.fact_order""",
+                (release_id,),
+            )]
+        return {
+            "release_id": release_id,
+            "album": release["title"],
+            "track_count": len(tracks),
+            "complete_track_count": sum(1 for row in tracks if row["status"] == "complete" and row["fact_count"] == 5 and row["stored_fact_count"] == 5),
+            "tracks": tracks,
+            "facts": facts,
+        }
+
     def random_collection_release(self, username: str) -> tuple[dict[str, Any] | None, int]:
         """Choose one owned release uniformly from the local collection cache."""
         with self.connect() as connection:
@@ -816,7 +1104,7 @@ class CollectionClient:
         self.database = CollectionDatabase(DATABASE_PATH, LEGACY_DATABASE_PATHS)
         self.session = requests.Session()
         self.session.headers.update({
-            "User-Agent": "HomeAssistantDiscogsConnector/0.7.5 (personal collection browser)",
+            "User-Agent": "HomeAssistantDiscogsConnector/0.7.9 (personal collection browser)",
             "Accept": "application/vnd.discogs.v2.plain+json",
         })
         if self.token:
@@ -824,6 +1112,7 @@ class CollectionClient:
         self._lock = threading.Lock()
         self._pick_lock = threading.Lock()
         self.enrichment_enabled = bool(options.get("enrich_collection_details", True))
+        self.facts_mcp_token = str(options.get("facts_mcp_token") or "").strip()
         self._enrichment_thread: threading.Thread | None = None
 
     def _publish_random_pick(self, state: str, attributes: dict[str, Any]) -> None:
@@ -1412,5 +1701,12 @@ if __name__ == "__main__":
     log(f"Discogs Connector listening on {PORT}; user={client.username}; token_configured={bool(client.token)}")
     start_scheduled_collection_refresh(client)
     start_random_pick_event_listener(client)
+    facts_mcp = start_facts_mcp(
+        client.database, client.facts_mcp_token, MCP_PORT, release_loader=client.release
+    )
+    if facts_mcp is None:
+        log("Track-facts MCP is disabled; set a facts_mcp_token of at least 32 characters in app Configuration")
+    else:
+        log(f"Track-facts MCP listening on {MCP_PORT}; token_configured=True")
     ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
 

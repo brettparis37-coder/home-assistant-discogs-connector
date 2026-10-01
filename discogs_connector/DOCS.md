@@ -13,7 +13,7 @@ The schema is relational for searching and joins:
 - `discogs_artists`, `discogs_release_artists`, `discogs_labels`, and `discogs_release_labels` store reusable artist/label records and release relationships.
 - `discogs_release_formats`, `discogs_format_descriptions`, and `discogs_release_classifications` store formats, genres, and styles.
 - `discogs_tracks`, `discogs_track_credits`, and `discogs_release_credits` store cached tracklists and credits for releases in your collection.
-- `discogs_track_fact_sets` stores per-track fact-generation status and snapshots; `discogs_track_facts` stores up to five ordered facts with source references. These tables are created now but are not populated automatically yet. They intentionally do not cascade-delete when Discogs refreshes a tracklist.
+- `discogs_track_fact_sets` stores per-track fact-generation status and snapshots; `discogs_track_facts` stores up to five ordered facts with source references. The tables can be populated through the optional track-facts MCP endpoint described below. They intentionally do not cascade-delete when Discogs refreshes a tracklist.
 - `discogs_masters` stores each master release's year and primary artwork URL; release-specific year and artwork remain on `discogs_releases`.
 - `discogs_release_payloads` retains the API response for cache reuse and fields not yet represented as columns. Normalized tables are the queryable representation for common lookups.
 - `discogs_collection_sync` records the latest collection refresh time and item count.
@@ -40,7 +40,7 @@ On first startup of version 0.3.0, the app preserves and imports existing Discog
 ## Install
 
 1. Add this repository in **Settings → Apps → App store → Repositories**.
-2. Install or update **Discogs Connector** to version 0.7.8.
+2. Install or update **Discogs Connector** to version 0.7.9.
 3. In Configuration, confirm the username and enter your Discogs personal access token if needed; save and restart.
 4. Open the **Discogs Collection** panel and load or refresh your collection.
 5. In SQLite Web, set **Database** to `/share/home_apps.sqlite3`, save, and restart SQLite Web. You should then see the `discogs_` tables alongside other custom-app tables.
@@ -92,7 +92,43 @@ Check the TidbytAssistant custom-content path and confirm the installed content 
 
 The app requires outbound HTTPS access to `api.discogs.com` and Discogs-hosted image URLs.
 
+## Track-facts MCP and Windows PowerShell
+
+Version 0.7.9 adds a small MCP server to this app. It runs beside the existing ingress panel on container port `8100`, mapped to the Home Assistant host. It reads and writes the app's `/share/home_apps.sqlite3` database locally. Four tools list collection releases needing facts, fetch one release's cached tracks and metadata, replace five facts for every song track on one release, and verify the saved rows. The write tool validates every exact `track_key`, requires exactly five linked facts per song, each written as a concise two-to-three-sentence detail with its source, and commits all rows for the selected release in one transaction with `status='complete'`.
+
+The endpoint is separate from the ingress panel and requires a random bearer token of at least 32 characters. Do not expose port 8100 to the public internet.
+
+1. Update **Discogs Connector** to 0.7.9. In its **Configuration**, set `facts_mcp_token` to a random token of at least 32 characters. Save and restart the app. Confirm the app log says the track-facts MCP is listening on port 8100.
+2. In Windows PowerShell, create and save a random token to your user environment, and copy it to the clipboard:
+
+   ```powershell
+   $bytes = New-Object byte[] 32
+   $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+   $rng.GetBytes($bytes)
+   $token = [Convert]::ToBase64String($bytes).TrimEnd('=').Replace('+', '-').Replace('/', '_')
+   $rng.Dispose()
+   [Environment]::SetEnvironmentVariable('DISCOGS_CONNECTOR_MCP_TOKEN', $token, 'User')
+   $env:DISCOGS_CONNECTOR_MCP_TOKEN = $token
+   Set-Clipboard -Value $token
+   ```
+
+   Paste the clipboard value into `facts_mcp_token` in Home Assistant app Configuration, then save and restart the app. The environment variable keeps the token out of Codex's MCP config file.
+3. From the same PowerShell session, register the MCP server with Codex:
+
+   ```powershell
+   codex mcp add discogs-connector --url http://homeassistant.local:8100/mcp --bearer-token-env-var DISCOGS_CONNECTOR_MCP_TOKEN
+   codex mcp list
+   ```
+
+   If the server is already registered, remove it first with `codex mcp remove discogs-connector`. Fully restart Codex after registration so its process receives the saved Windows environment variable. The CLI and desktop Codex share the MCP configuration.
+4. If port 8100 is occupied, change the host-side mapping for container port 8100 in **Settings → Apps → Discogs Connector → Configuration → Network** and use that host port in the Codex URL.
+
+Once connected, the Discogs track-facts skill can select an album, load its exact track keys, research facts, write them for all tracks, and verify the result without SQL export/import or an approval pause. SQLite Web remains useful for manual inspection; it is not required for Codex. Avoid opening the live SQLite file directly from Windows over Samba. Keep database operations inside this app or use its network API.
+
+### PowerShell and Home Assistant CLI
+
+Windows PowerShell can call the MCP endpoint over HTTP. Windows OpenSSH is another way to connect to Home Assistant if you install and configure its **Terminal & SSH** app. Home Assistant's `ha` CLI is for Home Assistant and app administration, logs, and backups; it is not a general SQL client. The direct MCP connection is the shortest path for Codex.
+
 ## Attribution
 
 This application uses Discogs' API but is not affiliated with, sponsored, or endorsed by Discogs. Discogs is a trademark of Zink Media, LLC. Collection results and detail pages attribute and link to Discogs.
-

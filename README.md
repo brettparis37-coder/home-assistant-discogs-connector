@@ -41,3 +41,6 @@ The card reels through a randomized, non-repeating sequence of cached collection
 
 The repository also provides a two-stage Tidbyt picker in [`examples/tidbyt/`](examples/tidbyt/): Hue Tap Dial Button 4 runs a roughly six-second cover shuffle, then shows the selected album details for ten seconds. It uses the cached Discogs collection, pauses the turntable now-playing loop, lets the rotary volume control interrupt it, and restores now-playing after the picker closes when a recognized record is still playing. Add the script and automations from the examples, and install `discogspick.star` as TidbytAssistant custom content. These files are not installed automatically by HACS or the app.
 
+
+
+The app also provides a bearer-token-protected track-facts MCP endpoint on port `8100` for AI-assisted fact work. It exposes only collection release selection, track-context reads, fact writes for one release, and write verification; it does not accept arbitrary SQL. See [`discogs_connector/DOCS.md`](discogs_connector/DOCS.md) for Windows PowerShell and Codex setup.
