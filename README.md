@@ -18,6 +18,8 @@ The card raises `discogs_random_pick_requested` inside Home Assistant. The app l
 
 To use Hue Tap Dial Button 4, add this automation to `automations.yaml` (or recreate it in the automation editor):
 
+This simple event automation is for triggering the dashboard picker. If you want Button 4 to run the Tidbyt sequence below, use the Tidbyt automation instead of enabling both on the same button.
+
 ```yaml
 - id: discogs_random_record_from_hue_dial
   alias: Hue dial - Pick a random Discogs record
@@ -37,5 +39,5 @@ To use Hue Tap Dial Button 4, add this automation to `automations.yaml` (or recr
 
 The card reels through a randomized, non-repeating sequence of cached collection covers, easing each cover upward as the shuffle slows, then holds the preselected album as the final frame before revealing its details. The card and cover frame keep the same dimensions through the transition. The app samples a vivid color from the selected cover and applies it directly to the full card background, so the result does not depend on browser cross-origin image access. The cover list comes from the local database; selecting a record does not make extra Discogs API calls. The release image is preferred; master artwork is used if the collection entry has no release image. Selection allows repeats across separate spins.
 
-An optional Tidbyt renderer and Home Assistant automation example are in [`examples/tidbyt/`](examples/tidbyt/). They show the picked record on the living-room Tidbyt for 15 seconds and then restore the turntable now-playing display when a recognized record is still playing. These files are examples and are not installed automatically by HACS or the app.
+The repository also provides a two-stage Tidbyt picker in [`examples/tidbyt/`](examples/tidbyt/): Hue Tap Dial Button 4 runs a roughly six-second cover shuffle, then shows the selected album details for ten seconds. It uses the cached Discogs collection, pauses the turntable now-playing loop, lets the rotary volume control interrupt it, and restores now-playing after the picker closes when a recognized record is still playing. Add the script and automations from the examples, and install `discogspick.star` as TidbytAssistant custom content. These files are not installed automatically by HACS or the app.
 
