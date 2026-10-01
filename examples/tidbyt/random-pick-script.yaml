@@ -1,0 +1,68 @@
+# Merge this script entry into /config/scripts.yaml, then reload scripts.
+show_discogs_random_record_on_tidbyt:
+  alias: Show a random Discogs record on Tidbyt
+  icon: mdi:album
+  mode: restart
+  sequence:
+    - variables:
+        previous_pick_id: "{{ state_attr('sensor.discogs_random_pick', 'pick_id') | default('', true) }}"
+    - action: script.turn_off
+      target:
+        entity_id: script.show_turntable_now_playing
+    - event: discogs_random_pick_requested
+      event_data:
+        source: hue_button_4_tidbyt
+    - wait_template: >-
+        {{ state_attr('sensor.discogs_random_pick', 'pick_id') != previous_pick_id
+           and state_attr('sensor.discogs_random_pick', 'status') in ['selected', 'empty', 'error'] }}
+      timeout: "00:00:30"
+      continue_on_timeout: true
+    - if:
+        - condition: template
+          value_template: >-
+            {{ wait.completed
+               and state_attr('sensor.discogs_random_pick', 'pick_id') != previous_pick_id
+               and state_attr('sensor.discogs_random_pick', 'status') == 'selected' }}
+      then:
+        - variables:
+            shuffle_arguments: >-
+              {% set c = state_attr('sensor.discogs_random_pick', 'tidbyt_shuffle_artworks') | default([], true) %}
+              mode=shuffle;cover_1={{ c[0] | default('', true) | replace(';', '') if c | length > 0 else '' }};cover_2={{ c[1] | default('', true) | replace(';', '') if c | length > 1 else '' }};cover_3={{ c[2] | default('', true) | replace(';', '') if c | length > 2 else '' }};cover_4={{ c[3] | default('', true) | replace(';', '') if c | length > 3 else '' }};cover_5={{ c[4] | default('', true) | replace(';', '') if c | length > 4 else '' }};cover_6={{ c[5] | default('', true) | replace(';', '') if c | length > 5 else '' }};cover_7={{ c[6] | default('', true) | replace(';', '') if c | length > 6 else '' }};cover_8={{ c[7] | default('', true) | replace(';', '') if c | length > 7 else '' }}
+        - action: tidbytassistant.push
+          data:
+            contenttype: custom
+            customcontent: discogspick
+            contentid: discogspick
+            publishtype: foreground
+            devicename:
+              - living_room
+            arguments: "{{ shuffle_arguments }}"
+        - delay: "00:00:06"
+        - action: tidbytassistant.push
+          data:
+            contenttype: custom
+            customcontent: discogspick
+            contentid: discogspick
+            publishtype: foreground
+            devicename:
+              - living_room
+            arguments: >-
+              mode=details;title={{ state_attr('sensor.discogs_random_pick', 'title') | default('Unknown album', true) | replace(';', ',') | replace('=', '-') }};artist={{ state_attr('sensor.discogs_random_pick', 'artist') | default('Unknown artist', true) | replace(';', ',') | replace('=', '-') }};year={{ state_attr('sensor.discogs_random_pick', 'master_year') | default(state_attr('sensor.discogs_random_pick', 'release_year'), true) | default('', true) | replace(';', ',') }};artwork_url={{ state_attr('sensor.discogs_random_pick', 'final_artwork_url') | default(state_attr('sensor.discogs_random_pick', 'artwork_url'), true) | default('', true) | replace(';', '') }};background={{ state_attr('sensor.discogs_random_pick', 'dominant_color') | default('#14243a', true) }}
+        - delay: "00:00:10"
+        - action: tidbytassistant.delete
+          data:
+            contentid: discogspick
+            devicename:
+              - living_room
+    - if:
+        - condition: template
+          value_template: >-
+            {{ is_state('sensor.turntable_playback_state', 'playing')
+               and state_attr('sensor.turntable_now_playing', 'recognition_status') in ['mock', 'recognized']
+               and states('sensor.turntable_now_playing') not in ['', 'Nothing playing', 'unknown', 'unavailable']
+               and not is_state('script.turntable_tidbyt_volume_override', 'on') }}
+      then:
+        - action: script.turn_on
+          target:
+            entity_id: script.show_turntable_now_playing
+
