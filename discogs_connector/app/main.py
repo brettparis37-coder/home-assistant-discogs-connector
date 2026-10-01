@@ -1168,7 +1168,7 @@ class CollectionClient:
         self.database = CollectionDatabase(DATABASE_PATH, LEGACY_DATABASE_PATHS)
         self.session = requests.Session()
         self.session.headers.update({
-            "User-Agent": "HomeAssistantDiscogsConnector/0.8.0 (personal collection browser)",
+            "User-Agent": "HomeAssistantDiscogsConnector/0.8.1 (personal collection browser)",
             "Accept": "application/vnd.discogs.v2.plain+json",
         })
         if self.token:
@@ -1538,9 +1538,6 @@ def start_random_pick_event_listener(client: CollectionClient) -> threading.Thre
             connection = None
             try:
                 import websocket
-Warning: truncated output (original token count: 5341)
-Total output lines: 220
-
 
                 connection = websocket.create_connection("ws://supervisor/core/websocket", timeout=20)
                 greeting = json.loads(connection.recv())
@@ -1771,4 +1768,3 @@ if __name__ == "__main__":
     else:
         log(f"Track-facts MCP listening on {MCP_PORT}; token_configured=True")
     ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
-
